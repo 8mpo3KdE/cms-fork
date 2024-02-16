@@ -1,0 +1,12 @@
+export CMS_AUTH_URL=https://demo:5000/v3
+
+export CMS_AUTH_METHOD=password
+export CMS_USERNAME=test
+export CMS_PASSWORD=user1234
+export CMS_PROJECT=test
+
+#export CMS_AUTH_METHOD=credential
+#export CMS_USERNAME=test
+#export CMS_CREDENTIAL_NAME=test
+#export CMS_CREDENTIAL_SECRET=user1234
+

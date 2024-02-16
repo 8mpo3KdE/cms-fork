@@ -1,0 +1,25 @@
+vrrp_script check-svc {
+    script "/etc/keepalived/check-svc"
+    interval 2
+    weight 20
+}
+
+vrrp_instance int-vip-{{vrid}} {
+    state MASTER
+    interface eth0
+    virtual_router_id {{vrid}}
+    priority 100
+    advert_int 1
+    notify "/etc/keepalived/notify"
+    virtual_ipaddress {
+        {{vip}}/32
+    }
+    authentication {
+        auth_type PASS
+        auth_pass VRRPPASS
+    }
+    track_script {
+        check-svc
+    }
+}
+

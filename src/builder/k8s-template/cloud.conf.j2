@@ -1,0 +1,17 @@
+[Global]
+domain-name = default
+region = RegionOne
+auth-url = {{os_auth_url}}
+tenant-id = {{os_project_id}}
+application-credential-name = "{{os_credential_name}}"
+application-credential-id = {{os_credential_id}}
+application-credential-secret = "{{os_credential_secret}}"
+ca-file = /etc/ssl/ca-bundle.pem
+
+[LoadBalancer]
+enabled = true
+use-octavia = true
+subnet-id = {{node_subnet_id}}
+floating-network-id = {{external_network_id}}
+provider-requires-serial-api-calls = true
+

@@ -1,0 +1,253 @@
+#!/bin/bash
+
+log()
+{
+    echo $(date +"%Y-%m-%d %H:%M:%S,%3N") $@
+}
+
+wait_for_host()
+{
+    local host=$1
+
+    retry=20
+    while (($retry > 0)); do
+        log INFO "Check $host, retry: $retry."
+        ssh -o ConnectTimeout=3 root@$host date > /dev/null 2>&1
+        if (($? == 0)); then
+            log INFO "Host $host is up."
+            break
+        fi
+        retry=$((retry - 1))
+        sleep 4
+    done
+    if (($retry == 0)); then
+        log ERROR "Timeout!"
+        exit 1
+    fi
+}
+
+set_repo()
+{
+    log INFO "Check repo."
+    if [ ! -d "/etc/yum.repos.d.orig" ]; then
+        mv /etc/yum.repos.d /etc/yum.repos.d.orig
+        mkdir -p /etc/yum.repos.d
+    fi
+    mv -f /tmp/depot.repo /etc/yum.repos.d/
+}
+
+disable_selinux()
+{
+    log INFO "Disable SELinux."
+    setenforce 0
+    cat > /etc/selinux/config << __EOF__
+SELINUX=permissive
+SELINUXTYPE=targeted
+__EOF__
+}
+
+install_nfs_server()
+{
+    log INFO "Install NFS server."
+    # With CentOS Stream 8 cloud image,
+    # rpcbind service is already installed and running.
+    dnf install -y nfs-utils
+    log INFO "It takes a minute to start nfs-server."
+    systemctl enable --now nfs-server
+}
+
+install_keepalived()
+{
+    log INFO "Install keepalived."
+    dnf install -y keepalived
+    mv -f /tmp/keepalived.conf /tmp/check-svc /tmp/notify \
+            /etc/keepalived/
+    chmod +x /etc/keepalived/check-svc
+    systemctl enable --now keepalived
+}
+
+deploy()
+{
+    local ha=$1
+
+    echo ""
+    log INFO "Deploy NFS."
+    set_repo
+    disable_selinux
+    install_nfs_server
+    if [ "$ha" == "True" ]; then
+        install_keepalived
+    fi
+}
+
+add_disk()
+{
+    local disk=$1
+    local serial=$2
+    local exported=$3
+
+    echo ""
+    log INFO "Add disk $disk."
+    retry=10
+    while (($retry > 0)); do
+        log INFO "Check device, retry: $retry."
+        dev=$(lsblk --list --output NAME,SERIAL | awk "/$serial/"'{print $1}')
+        if [ -n "$dev" ]; then
+            log INFO "Get dev $dev from serial $serial."
+            break
+        fi
+        retry=$((retry - 1))
+        sleep 3
+    done
+    if (($retry == 0)); then
+        log ERROR "Timeout!"
+        exit 1
+    fi
+    mkfs.xfs /dev/$dev
+    mkdir -p /nfs/$disk
+    mount /dev/$dev /nfs/$disk
+    kv=$(udevadm info -n $dev -q property | grep "ID_FS_UUID=")
+    log INFO "Get dev FS UUID $kv."
+    IFS='='; a=(${kv}); unset IFS
+    id=${a[1]}
+    echo "UUID=$id  /nfs/$disk  xfs  defaults  0  0" >> /etc/fstab
+    if [ $exported == "True" ]; then
+        echo "/nfs/$disk    *(rw,no_root_squash)" >> /etc/exports
+        exportfs -rav
+    fi
+}
+
+remove_disk()
+{
+    local disk=$1
+
+    echo ""
+    log INFO "Remove disk $disk."
+    sed -i "/$disk/d" /etc/exports
+    exportfs -rav
+    umount /nfs/$disk
+    sed -i "/\/nfs\/$disk/d" /etc/fstab
+    rm -fr /nfs/$disk
+}
+
+add_directory()
+{
+    local dir=$1
+
+    echo ""
+    log INFO "Add directory $dir."
+
+    mkdir -p $dir
+    echo "$dir    *(rw,no_root_squash)" >> /etc/exports
+    exportfs -rav
+}
+
+remove_directory()
+{
+    local dir=$1
+
+    echo ""
+    log INFO "Remove directory $dir."
+    IFS='/'; a=(${dir}); unset IFS
+    disk=${a[2]}
+    name=${a[3]}
+    sed -i "/$disk\/$name/d" /etc/exports
+    exportfs -rav
+    rm -fr $dir
+}
+
+help()
+{
+    echo "Help"
+    echo "$0 deploy <host> <id> <ha>"
+    echo "$0 add-directory <host> <id> <directory>"
+    echo "$0 remove-directory <host> <id> <directory>"
+}
+
+start()
+{
+    local copy_files tmp_files host id ha
+
+    if [ -z "$2" ]; then help; exit 1; else host=$2; fi
+    if [ -z "$3" ]; then help; exit 1; else id=$3; fi
+
+    if [ "$self_path" != "/tmp" ]; then
+        copy_files="$0"
+        tmp_path=/tmp/$id
+        template_path=$self_path/nfs-template
+    fi
+    case "$1" in
+    deploy)
+        ha=$4
+        if [ "$copy_files" ]; then
+            copy_files="$copy_files $tmp_path/*"
+            if [ $ha == "True" ]; then
+                copy_files="$copy_files $template_path/check-svc
+                        $template_path/notify"
+            fi
+        else
+            deploy $ha
+        fi
+        ;;
+    add-disk)
+        disk=$4
+        serial=$5
+        exported=$6
+        if [ "$copy_files" ]; then
+            copy_files="$copy_files"
+        else
+            add_disk $disk $serial $exported
+        fi
+        ;;
+    remove-disk)
+        disk=$4
+        if [ "$copy_files" ]; then
+            copy_files="$copy_files"
+        else
+            remove_disk $disk
+        fi
+        ;;
+    add-directory)
+        dir=$4
+        if [ "$copy_files" ]; then
+            copy_files="$copy_files"
+        else
+            add_directory $dir
+        fi
+        ;;
+    remove-directory)
+        dir=$4
+        if [ "$copy_files" ]; then
+            copy_files="$copy_files"
+        else
+            remove_directory $dir
+        fi
+        ;;
+    *)
+        help
+        return
+        ;;
+    esac
+    if [ "$copy_files" ]; then
+        echo ""
+        log INFO $@
+        wait_for_host $host
+        log INFO "Copy files to $host."
+        scp $copy_files root@$host:/tmp/
+        log INFO "Run $self_name on $host."
+        ssh root@$host /tmp/$self_name "$@"
+        log INFO "Clean up on $host."
+        for f in $copy_files; do
+            tmp_files="$tmp_files /tmp/$(basename $f)"
+        done
+        ssh root@$host rm -f $tmp_files
+    fi
+}
+
+
+self_name=$(basename $0)
+self_path=$(dirname $0)
+start "$@"
+
+exit 0
+

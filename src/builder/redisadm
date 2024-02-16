@@ -1,0 +1,201 @@
+#!/bin/bash
+
+log()
+{
+    echo $(date +"%Y-%m-%d %H:%M:%S,%3N") $@
+}
+
+wait_for_host()
+{
+    local host=$1
+
+    retry=20
+    while (($retry > 0)); do
+        log INFO "Check $host, retry: $retry."
+        ssh -o ConnectTimeout=3 root@$host date > /dev/null 2>&1
+        if (($? == 0)); then
+            log INFO "Host $host is up."
+            break
+        fi
+        retry=$((retry - 1))
+        sleep 4
+    done
+    if (($retry == 0)); then
+        log ERROR "Timeout!"
+        exit 1
+    fi
+}
+
+set_repo()
+{
+    log INFO "Check repo."
+    if [ ! -d "/etc/yum.repos.d.orig" ]; then
+        mv /etc/yum.repos.d /etc/yum.repos.d.orig
+        mkdir -p /etc/yum.repos.d
+    fi
+    mv -f $tmp_path/depot.repo /etc/yum.repos.d/
+}
+
+disable_selinux()
+{
+    log INFO "Disable SELinux."
+    setenforce 0
+    cat > /etc/selinux/config << __EOF__
+SELINUX=permissive
+SELINUXTYPE=targeted
+__EOF__
+}
+
+install_redis()
+{
+    local version=$1
+
+    log INFO "Install Redis $version."
+    IFS='.'; a=(${version}); unset IFS
+    major=${a[0]}
+    if (($major >= 7 )); then
+        dnf module enable -y redis:$major
+    fi
+    dnf install -y redis-$version
+
+    for role in master slave; do
+        log INFO "Enable redis-$role."
+        cp -r /etc/systemd/system/redis.service.d \
+                /etc/systemd/system/redis-$role.service.d
+        file=/usr/lib/systemd/system/redis-$role.service
+        cp /usr/lib/systemd/system/redis.service $file
+        sed -i -e "s/redis.conf/redis-$role.conf/" \
+                -e "s/shutdown/shutdown redis-$role/" $file
+        mkdir /var/lib/redis-$role
+        chown redis:redis /var/lib/redis-$role
+        mv -f $tmp_path/redis-$role.conf /etc/redis/
+        systemctl enable redis-$role
+    done
+    i=1
+    while ((i <= 10)); do
+        log INFO "Start redis-master and redis-slave #$i."
+        systemctl restart redis-master
+        systemctl restart redis-slave
+        sleep 2
+        systemctl is-active redis-master && systemctl is-active redis-slave
+        if [ $? == 0 ]; then
+            break
+        else
+            i=$((i + 1))
+            sleep 5
+        fi
+    done
+}
+
+op_deploy()
+{
+    local version=$1
+
+    echo ""
+    log INFO "Deploy Redis."
+    set_repo
+    disable_selinux
+    install_redis $version
+}
+
+op_bootstrap()
+{
+    local addrs=$1
+
+    log INFO "Bootstrap Redis cluster $addrs."
+    masters=
+    slaves=
+    IFS=','; a=(${addrs}); unset IFS
+    for ((i=0; i<$((${#a[*]})); i++)); do
+        masters="$masters ${a[$i]}:6379"
+        slaves="$slaves ${a[$i]}:6378"
+    done
+    redis-cli --cluster create $masters $slaves \
+            --cluster-replicas 1 --cluster-yes
+}
+
+help()
+{
+    echo "Help"
+    echo "$self_name deploy" \
+            "--host <host> --id <id> --version <version>"
+    echo "$self_name bootstrap" \
+            "--host <host> --id <id> --addresses <addresses>"
+}
+
+start()
+{
+    local copy_files host id version args_orig
+
+    args_orig="$@"
+    op=$1
+    if [ -z "$op" ]; then help; exit 1; fi
+    shift
+    for item in $@; do
+        if [ ${item:0:2} == "--" ]; then
+            arg_name=$item
+            continue
+        fi
+        case $arg_name in
+        --host)
+            host=$item
+            ;;
+        --id)
+            id=$item
+            ;;
+        --version)
+            version=$item
+            ;;
+        --addresses)
+            addresses=$item
+            ;;
+        *)
+            help; exit 1
+            ;;
+        esac
+    done
+    if [ -z $host ] || [ -z $id ]; then help; exit 1; fi
+
+    tmp_path=/tmp/$id
+    if [ "$self_path" != "$tmp_path" ]; then
+        copy_files=$self_path/$self_name
+    fi
+    case $op in
+    deploy)
+        if [ "$copy_files" ]; then
+            copy_files="$copy_files $tmp_path/*"
+        else
+            op_deploy $version
+        fi
+        ;;
+    bootstrap)
+        if [ "$copy_files" ]; then
+            copy_files="$copy_files $tmp_path/*"
+        else
+            op_bootstrap $addresses
+        fi
+        ;;
+    *)
+        help; exit 1
+        ;;
+    esac
+    if [ "$copy_files" ]; then
+        echo ""
+        wait_for_host $host
+        log INFO "Copy files to $host."
+        ssh root@$host mkdir -p $tmp_path
+        scp $copy_files root@$host:$tmp_path
+        log INFO "Run $self_name on $host."
+        ssh root@$host $tmp_path/$self_name "$args_orig"
+        log INFO "Clean up on $host."
+        ssh root@$host rm -fr $tmp_path
+    fi
+}
+
+
+self_name=$(basename $0)
+self_path=$(dirname $0)
+start "$@"
+
+exit 0
+

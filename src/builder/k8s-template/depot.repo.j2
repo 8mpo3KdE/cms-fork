@@ -1,0 +1,16 @@
+[cri-o]
+name=cri-o
+baseurl=http://{{depot_fqdn}}/{{repo_fedora_coreos}}
+proxy={{http_proxy_url}}
+enabled=1
+gpgcheck=0
+priority=9
+
+[Kubernetes]
+name=Kubernetes
+baseurl=http://{{depot_fqdn}}/{{repo_kubernetes}}
+proxy={{http_proxy_url}}
+enabled=1
+gpgcheck=0
+priority=9
+

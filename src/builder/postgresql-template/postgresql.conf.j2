@@ -1,0 +1,37 @@
+listen_addresses = '0.0.0.0'
+port = 5432
+max_connections = 100
+shared_buffers = 128MB
+dynamic_shared_memory_type = posix
+wal_level = replica
+synchronous_commit = on
+archive_mode = off
+
+max_wal_senders = 10
+max_replication_slots = 10
+max_slot_wal_keep_size = -1
+
+synchronous_standby_names = '{{standby_names}}'
+
+primary_conninfo = 'host={{vip}} port=5432 user=replica application_name={{local_name}}'
+primary_slot_name = '{{local_name}}'
+hot_standby = on
+
+log_destination = 'stderr'
+logging_collector = on
+log_directory = 'log'
+log_filename = 'postgresql-%a.log'
+log_file_mode = 0600
+log_truncate_on_rotation = on
+log_rotation_age = 1d
+log_rotation_size = 0
+log_timezone = 'UTC'
+
+datestyle = 'iso, mdy'
+timezone = 'UTC'
+lc_messages = 'en_US.UTF-8'
+lc_monetary = 'en_US.UTF-8'
+lc_numeric = 'en_US.UTF-8'
+lc_time = 'en_US.UTF-8'
+default_text_search_config = 'pg_catalog.english'
+

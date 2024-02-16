@@ -1,0 +1,277 @@
+#!/bin/bash
+
+#OS_URL=https://os
+#OS_AUTH_URL=$OS_URL:5000
+#OS_USERNAME=test
+#OS_PASSWORD=user1234
+#OS_PROJECT_NAME=POC
+
+#OS_AUTH_URL=https://auth:5000
+#OS_ADMIN_USERNAME=infra-service
+#OS_ADMIN_PASSWORD=InfraService1234
+#OS_USERNAME=svc-dev
+#OS_PASSWORD=user1234
+#OS_PROJECT_NAME=infra-svc
+
+OS_AUTH_URL=https://auth:5000
+#OS_ADMIN_USERNAME=infra-service
+#OS_ADMIN_PASSWORD=InfraService1234
+OS_USERNAME=dev
+OS_PASSWORD=user1234
+OS_PROJECT_NAME=dev
+
+IFS=':'; a=(${OS_AUTH_URL}); unset IFS
+os_url=${a[0]}:${a[1]}
+
+test()
+{
+    curl -i -X POST \
+        -H "Content-Type: application/json" \
+        -d '
+    {
+    "auth": {
+        "identity": {
+            "methods": ["password"],
+            "password": {
+                "user": {
+                    "name": "test",
+                    "password": "test123",
+                    "domain": {"name": "Default"}
+                }
+            }
+        }
+    }
+    }' \
+        $OS_AUTH_URL/v3/auth/tokens > /tmp/resp
+}
+
+get_admin_token()
+{
+    echo "INFO: Get admin token..."
+    curl -s -i -X POST \
+        -H "Content-Type: application/json" \
+        -d "
+    {
+    \"auth\": {
+        \"identity\": {
+            \"methods\": [\"password\"],
+            \"password\": {
+                \"user\": {
+                    \"name\": \"$OS_ADMIN_USERNAME\",
+                    \"password\": \"$OS_ADMIN_PASSWORD\",
+                    \"domain\": { \"id\": \"default\" }
+                }
+            }
+        },
+        \"scope\": {
+            \"project\": {
+                \"name\": \"service\",
+                \"domain\": { \"id\": \"default\" }
+            }
+        }
+    }
+    }" \
+        $OS_AUTH_URL/v3/auth/tokens > /tmp/resp
+}
+
+get_token_unscoped()
+{
+    echo "INFO: Get unscoped token..."
+    curl -s -i -X POST \
+        -H "Content-Type: application/json" \
+        -d "
+    {
+    \"auth\": {
+        \"identity\": {
+            \"methods\": [\"password\"],
+            \"password\": {
+                \"user\": {
+                    \"name\": \"$OS_USERNAME\",
+                    \"password\": \"$OS_PASSWORD\",
+                    \"domain\": {\"id\": \"default\"}
+                }
+            }
+        }
+    }
+    }" \
+        $OS_AUTH_URL/v3/auth/tokens > /tmp/resp
+}
+
+get_token_scoped()
+{
+    echo "INFO: Get scoped token..."
+    curl -s -i -X POST \
+        -H "Content-Type: application/json" \
+        -d "
+    {
+    \"auth\": {
+        \"identity\": {
+            \"methods\": [\"password\"],
+            \"password\": {
+                \"user\": {
+                    \"name\": \"$OS_USERNAME\",
+                    \"password\": \"$OS_PASSWORD\",
+                    \"domain\": { \"id\": \"default\" }
+                }
+            }
+        },
+        \"scope\": {
+            \"project\": {
+                \"name\": \"$OS_PROJECT_NAME\",
+                \"domain\": { \"id\": \"default\" }
+            }
+        }
+    }
+    }" \
+        $OS_AUTH_URL/v3/auth/tokens > /tmp/resp
+}
+
+validate_token()
+{
+    echo "INFO: Validate user token..."
+    curl -s -X GET \
+            -H "x-auth-token: $admin_token" \
+            -H "x-subject-token: $user_token" \
+            $OS_AUTH_URL/v3/auth/tokens
+}
+
+get_user_id()
+{
+    local name=$1
+
+    echo "INFO: Get user ID..."
+    curl -s -X GET \
+            -H "x-auth-token: $token" \
+            $OS_AUTH_URL/v3/users?name=$name
+}
+
+get_projects()
+{
+    echo "INFO: Get projects..."
+}
+
+network_list()
+{
+    echo "INFO: List network..."
+    curl -s -X GET \
+            -H "x-auth-token: $token" \
+            $os_url:9696/v2.0/networks
+}
+
+create_image()
+{
+    echo "INFO: Create image."
+    curl -s -i -X POST \
+        -H "Content-Type: application/json" \
+        -H "x-auth-token: $user_token" \
+        -d "
+    {
+        \"name\": \"temp\",
+        \"container_format\": \"bare\",
+        \"disk_format\": \"raw\",
+        \"visibility\": \"private\"
+    }" $OS_URL:9292/v2/images
+}
+
+patch_image()
+{
+    local image_id=f14eff94-afe9-4f32-8010-fe96923e2321
+    local fsid=35d050c0-77c0-11eb-9242-2cea7ff9d07c
+    local image_url=rbd://$fsid/image/$image_id/snap
+
+    echo "INFO: Patch image."
+    curl -s -i -X PATCH \
+        -H "content-type: application/openstack-images-v2.1-json-patch" \
+        -H "x-auth-token: $user_token" \
+        -d "
+    [
+        {
+            \"op\": \"add\",
+            \"path\": \"/locations/1\",
+            \"value\": {
+                \"url\": \"$image_url\",
+                \"metadata\": {
+                    \"store\": \"rbd\"
+                }
+            }
+        }
+    ]" $OS_URL:9292/v2/images/$image_id
+}
+
+create_poc_builder()
+{
+    echo "INFO: Create instance."
+    curl -s -i -X POST \
+        -H "Content-Type: application/json" \
+        -H "x-auth-token: $user_token" \
+        -d '
+    {
+        "server" : {
+            "name" : "builder",
+            "flavorRef" : "6b72607c-550a-462b-adef-34bf666d4ca5",
+            "networks" : [{
+                "uuid" : "f63e2d4b-05b3-4c50-b766-4f9176c02e6d"
+            }],
+            "block_device_mapping_v2": [
+            {
+                "uuid": "c85d153c-51db-4e8a-84fe-f1067c53cbe4",
+                "source_type": "image",
+                "destination_type": "volume",
+                "volume_size": "40",
+                "boot_index": 0
+            },
+            {
+                "uuid": "d6b13f56-59e9-4c7c-9f9c-a14cf55c88f0",
+                "source_type": "volume",
+                "destination_type": "volume",
+                "disk_bus": "sata"
+            }]
+        }
+    }' $OS_URL:8774/v2.1/servers
+}
+
+create_poc_service()
+{
+    echo "INFO: Create instance."
+    curl -s -i -X POST \
+        -H "Content-Type: application/json" \
+        -H "x-auth-token: $user_token" \
+        -d '
+    {
+        "server" : {
+            "name" : "POC-10",
+            "flavorRef" : "9e880faa-173b-462d-bbcb-00fef156ba97",
+            "networks" : [{
+                "port" : "27199200-1579-4273-bab9-4a31e664b9f9"
+            }],
+            "block_device_mapping_v2": [{
+                "uuid": "d6b13f56-59e9-4c7c-9f9c-a14cf55c88f0",
+                "source_type": "volume",
+                "destination_type": "volume",
+                "disk_bus": "sata",
+                "boot_index": 0
+            }]
+        }
+    }' $OS_URL:8774/v2.1/servers
+}
+
+#get_admin_token
+#grep "[xX]-[sS]ubject-[tT]oken" /tmp/resp
+#admin_token=$(cat /tmp/resp | awk "/[xX]-[sS]ubject-[tT]oken/"'{print $2}')
+#admin_token=${admin_token//[$'\r\n']}
+#echo "INFO: Admin Token: $admin_token"
+
+get_token_scoped
+exit 0
+#grep "[xX]-[sS]ubject-[tT]oken" /tmp/resp
+user_token=$(cat /tmp/resp | awk "/[xX]-[sS]ubject-[tT]oken/"'{print $2}')
+user_token=${user_token//[$'\r\n']}
+echo "INFO: User Token: $user_token"
+#create_image
+#patch_image
+create_poc_builder
+
+#validate_token
+
+exit
+

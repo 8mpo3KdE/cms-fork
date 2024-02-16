@@ -1,0 +1,22 @@
+[crio]
+
+[crio.runtime]
+selinux = true
+default_sysctls = [
+    "net.ipv4.ip_unprivileged_port_start=0",
+    "net.ipv4.ping_group_range=0 2147483647"
+]
+
+[crio.network]
+plugin_dirs = [
+    "/opt/cni/bin",
+    "/usr/libexec/cni",
+]
+
+[crio.metrics]
+enable_metrics = true
+metrics_port = 9537
+
+[crio.image]
+pause_image="{{registry_fqdn}}/kubernetes/pause:3.7"
+

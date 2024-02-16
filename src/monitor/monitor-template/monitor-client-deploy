@@ -1,0 +1,121 @@
+#!/bin/bash
+
+check_system_version(){
+    read -p "Please enter the cloud monitor service address: " CLOUD_MONITOR_SERVICE_ADDRESS
+    echo "CLOUD_MONITOR_SERVICE_ADDRESS: $CLOUD_MONITOR_SERVICE_ADDRESS"
+
+    DEFAULT_HOSTNAME=$(hostname | sed 's/\.novalocal//')
+    echo "DEFAULT_HOSTNAME: $DEFAULT_HOSTNAME"
+
+    read -p "Please enter the hostname (press enter to use default: $DEFAULT_HOSTNAME): " HOSTNAME_INPUT
+    HOSTNAME=${HOSTNAME_INPUT:-$DEFAULT_HOSTNAME}
+    echo "HOSTNAME: $HOSTNAME"
+
+    OS_ID=$(grep "^ID=" /etc/os-release | cut -d'=' -f2 | tr -d '"')
+    OS_VERSION_ID=$(grep "^VERSION_ID=" /etc/os-release | cut -d'=' -f2 | tr -d '"')
+    echo "OS_ID: $OS_ID"
+    echo "OS_VERSION_ID: $OS_VERSION_ID"
+
+    SUPPORTED_VERSIONS=("ubuntu22.04" "centos8" "centos9")
+    CURRENT_OS_VERSION="${OS_ID}${OS_VERSION_ID}"
+    echo "CURRENT_OS_VERSION: $CURRENT_OS_VERSION"
+
+    if [[ " ${SUPPORTED_VERSIONS[@]} " =~ " ${CURRENT_OS_VERSION} " ]]; then
+        DOWNLOAD_PATH=$CURRENT_OS_VERSION
+    else
+        echo "Unsupported OS version. Exiting."
+        exit 1
+    fi
+}
+
+set_dependency(){
+    if [[ "$OS_ID" == "centos" ]]; then
+        cat > /etc/yum.repos.d/monitor_client.repo <<EOF
+[monitor-client-repo]
+name=Monitor Client Repository
+baseurl=http://$CLOUD_MONITOR_SERVICE_ADDRESS/$CURRENT_OS_VERSION/
+enabled=1
+gpgcheck=0
+EOF
+
+        sudo dnf clean all
+        sudo dnf install -y zabbix-agent2 rsyslog-elasticsearch --disablerepo="*" --enablerepo="monitor-client-repo"
+
+    fi
+
+    echo "Dependencies installed successfully."
+}
+
+set_zabbix_agent()
+{
+    sed -i "s/^ServerActive=.*$/ServerActive=$CLOUD_MONITOR_SERVICE_ADDRESS:10051/g" /etc/zabbix/zabbix_agent2.conf
+    sed -i "s/^Hostname=.*$/Hostname=$HOSTNAME/g" /etc/zabbix/zabbix_agent2.conf
+    sed -i "s/^\s*#\?\s*HostMetadata=.*$/HostMetadata=logs/g" /etc/zabbix/zabbix_agent2.conf
+    systemctl daemon-reload
+    systemctl enable zabbix-agent2
+    systemctl restart zabbix-agent2
+}
+
+set_rsyslog()
+{
+    echo "INFO: Setting up rsyslog."
+    mkdir /var/log/rsyslog/
+
+    if ! grep -q "omelasticsearch" /etc/rsyslog.conf; then
+        cat <<EOL >> /etc/rsyslog.conf
+
+module(load="omelasticsearch")
+
+template (name="rsyslog-node-index" type="list")
+{
+    constant(value="monitor-server")
+    property(dateFormat="year" name="timereported")
+    constant(value=".")
+    property(dateFormat="month" name="timereported")
+    constant(value=".")
+    property(dateFormat="day" name="timereported")
+}
+template (name="rsyslog-record" type="list" option.jsonf="on")
+{
+    property(dateFormat="rfc3339" format="jsonf" name="timereported" outname="@timestamp")
+    property(format="jsonf" name="hostname" outname="host")
+    property(format="jsonf" name="syslogseverity" outname="severity")
+    property(format="jsonf" name="syslogfacility-text" outname="facility")
+    property(format="jsonf" name="syslogtag" outname="tag")
+    property(format="jsonf" name="app-name" outname="source")
+    property(format="jsonf" name="msg" outname="message")
+    constant(format="jsonf" outname="file" value="")
+    constant(format="jsonf" outname="cloud" value="one")
+    constant(format="jsonf" outname="region" value="regionOne")
+}
+# elasticsearch
+action(type="omelasticsearch"
+    name="elasticsearch"
+    allowunsignedcerts="on"
+    bulkmode="on"
+    dynSearchIndex="on"
+    errorfile="/var/log/rsyslog/omelasticsearch.log"
+    pwd="sendlog"
+    searchIndex="rsyslog-node-index"
+    server=["127.0.0.1"]
+    serverport="9200"
+    skipverifyhost="on"
+    template="rsyslog-record"
+    uid="sender"
+    searchType="_doc"
+)
+
+EOL
+    fi
+    sed -i "s/server=\[.*\]/server=[\"$CLOUD_MONITOR_SERVICE_ADDRESS\"]/g" /etc/rsyslog.conf
+    sed -i "s/constant(value=\"monitor-server\")/constant(value=\"$HOSTNAME\")/g" /etc/rsyslog.conf
+    systemctl restart rsyslog
+    
+}
+
+check_system_version
+set_dependency
+set_zabbix_agent
+set_rsyslog
+
+echo "INFO: monitor-client setup complete."

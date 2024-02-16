@@ -1,0 +1,107 @@
+#!/usr/bin/python3
+
+import os
+import sys
+import logging
+import argparse
+import util
+
+import identity
+import network
+import image
+import block
+import compute
+import plan
+import builder
+
+log = logging.getLogger("cms")
+
+root_args = [
+    {"name": "--cms-auth-url", "attr": {}},
+    {"name": "--cms-api-url", "attr": {}},
+    {"name": "--cms-auth-method", "attr": {}},
+    {"name": "--cms-project", "attr": {}},
+    {"name": "--cms-username", "attr": {}},
+    {"name": "--cms-password", "attr": {}},
+    {"name": "--cms-credential-name", "attr": {}},
+    {"name": "--cms-credential-secret", "attr": {}}
+]
+
+common_args = [
+    {
+        "name": ["--debug"],
+        "attr": {"action": "store_true"}
+    },
+    {
+        "name": ["--format", "-f"],
+        "attr": {
+            "choices": ["json", "yaml", "table", "value"],
+            "default": "table"}
+    },
+    {
+        "name": ["--column", "-c"],
+        "attr": {"action": "append"}
+    }
+]
+
+svc_schemas = {
+    "identity": identity.arg_schema,
+    "network": network.arg_schema,
+    "image": image.arg_schema,
+    "block": block.arg_schema,
+    "compute": compute.arg_schema,
+    "plan": plan.arg_schema,
+    "builder": builder.arg_schema
+}
+
+
+def main():
+    for arg in root_args:
+        if not arg["name"] in sys.argv:
+            env_v = os.environ.get(
+                    arg["name"][2:].upper().replace("-", "_"))
+            if env_v:
+                sys.argv.insert(1, arg["name"])
+                sys.argv.insert(2, env_v)
+    common_p = argparse.ArgumentParser(add_help=False)
+    for arg in common_args:
+        common_p.add_argument(*arg["name"], **arg["attr"])
+    parser = argparse.ArgumentParser()
+    for arg in root_args:
+        parser.add_argument(arg["name"], **arg["attr"])
+    #svc_sub_p = parser.add_subparsers(title="Service", metavar="<service>")
+    #for svc in svc_schemas.keys():
+    #    svc_p = svc_sub_p.add_parser(svc, help=f"{svc} service")
+    #    res_sub_p = svc_p.add_subparsers(title="Resource",
+    #            metavar="<resource>")
+    #    util.parser_init(res_sub_p, [common_p], svc_schemas[svc])
+    res_sub_p = parser.add_subparsers(title="Resource", metavar="<resource>")
+    for svc in svc_schemas.keys():
+        util.parser_init(res_sub_p, [common_p], svc_schemas[svc])
+    args = parser.parse_args()
+    if "res_class" not in args or "op" not in args:
+        parser.print_help()
+        return
+    if (not args.cms_api_url) and (not args.cms_auth_url):
+        print("ERROR: Both cms-api-url and cms-auth-url are missing!")
+        return
+    log_hdlr = logging.StreamHandler()
+    log_format = logging.Formatter("%(levelname)s: %(message)s")
+    log_hdlr.setFormatter(log_format)
+    log.addHandler(log_hdlr)
+    log.setLevel("INFO")
+    if args.debug:
+        log.setLevel("DEBUG")
+    log.debug(f"args: {args}")
+    token_pack = {"token": None, "catalog": []}
+    if not ((args.res_class == identity.Auth) and (args.op == "create")):
+        token_pack = identity.Auth(args, token_pack).create(no_output=True)
+        if not token_pack:
+            log.error("Get token failed!")
+            return
+    getattr(args.res_class(args, token_pack), args.op.replace("-", "_"))()
+
+
+if __name__ == '__main__':
+    main()
+

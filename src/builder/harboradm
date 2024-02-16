@@ -1,0 +1,168 @@
+#!/bin/bash
+
+log()
+{
+    echo $(date +"%Y-%m-%d %H:%M:%S,%3N") $@
+}
+
+wait_for_host()
+{
+    local host=$1
+
+    retry=20
+    while (($retry > 0)); do
+        log INFO "Check $host, retry: $retry."
+        ssh -o ConnectTimeout=3 root@$host date > /dev/null 2>&1
+        if (($? == 0)); then
+            log INFO "Host $host is up."
+            break
+        fi
+        retry=$((retry - 1))
+        sleep 4
+    done
+    if (($retry == 0)); then
+        log ERROR "Timeout!"
+        exit 1
+    fi
+}
+
+disable_selinux()
+{
+    log INFO "Disable SELinux."
+    setenforce 0
+    cat > /etc/selinux/config << __EOF__
+SELINUX=permissive
+SELINUXTYPE=targeted
+__EOF__
+}
+
+set_repo()
+{
+    log INFO "Check repo."
+    if [ ! -d "/etc/yum.repos.d.orig" ]; then
+        mv /etc/yum.repos.d /etc/yum.repos.d.orig
+        mkdir -p /etc/yum.repos.d
+    fi
+    mv -f $tmp_path/depot.repo /etc/yum.repos.d/
+    mv -f $tmp_path/hosts /etc/
+}
+
+set_client_cert()
+{
+    log INFO "Install client cert."
+    mv -f $tmp_path/client.pem /etc/pki/ca-trust/source/anchors/
+    /usr/bin/update-ca-trust
+}
+
+install_docker()
+{
+    log INFO "Install Docker CE."
+    dnf install -y docker-ce
+    mkdir -p /etc/docker
+    mv -f $tmp_path/daemon.json /etc/docker/
+    systemctl enable --now docker
+}
+
+install_harbor()
+{
+    local version=$1
+
+    log INFO "Install Harbor $version."
+    mkdir -p harbor
+    cd harbor
+    mv $tmp_path/common.sh $tmp_path/install.sh $tmp_path/prepare \
+            $tmp_path/harbor.yml .
+    chmod +x install.sh common.sh prepare
+    ./install.sh
+    cd ..
+}
+
+op_deploy()
+{
+    local version=$1
+
+    echo ""
+    log INFO "Deploy Harbor."
+    disable_selinux
+    set_repo
+    set_client_cert
+    install_docker
+    install_harbor $version
+}
+
+help()
+{
+    echo "Help"
+    echo "$self_name deploy" \
+            "--host <host> --id <id> --version <version>"
+}
+
+start()
+{
+    local copy_files host id version args_orig
+
+    args_orig="$@"
+    op=$1
+    if [ -z "$op" ]; then help; exit 1; fi
+    shift
+    for item in $@; do
+        if [ ${item:0:2} == "--" ]; then
+            arg_name=$item
+            continue
+        fi
+        case $arg_name in
+        --host)
+            host=$item
+            ;;
+        --id)
+            id=$item
+            ;;
+        --version)
+            version=$item
+            ;;
+        *)
+            help; exit 1
+            ;;
+        esac
+    done
+    if [ -z $host ] || [ -z $id ]; then help; exit 1; fi
+
+    tmp_path=/tmp/$id
+    if [ "$self_path" != "$tmp_path" ]; then
+        copy_files=$self_path/$self_name
+        template_path=$self_path/harbor-template
+        client_cert=/etc/pki/ca-trust/source/anchors/client.pem
+    fi
+    case $op in
+    deploy)
+        if [ "$copy_files" ]; then
+            copy_files="$copy_files $tmp_path/* $client_cert
+                    $template_path/common.sh $template_path/install.sh"
+        else
+            op_deploy $version
+        fi
+        ;;
+    *)
+        help; exit 1
+        ;;
+    esac
+    if [ "$copy_files" ]; then
+        echo ""
+        wait_for_host $host
+        log INFO "Copy files to $host."
+        ssh root@$host mkdir -p $tmp_path
+        scp $copy_files root@$host:$tmp_path
+        log INFO "Run $self_name on $host."
+        ssh root@$host $tmp_path/$self_name "$args_orig"
+        log INFO "Clean up on $host."
+        ssh root@$host rm -fr $tmp_path
+    fi
+}
+
+
+self_name=$(basename $0)
+self_path=$(dirname $0)
+start "$@"
+
+exit 0
+

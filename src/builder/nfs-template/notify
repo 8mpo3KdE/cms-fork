@@ -1,0 +1,16 @@
+#!/bin/bash
+
+do_umount()
+{
+    for p in $(cat /etc/fstab | awk "/nfs/"'{print $2}'); do
+        umount $p
+    done
+}
+
+if [ $3 == "MASTER" ]; then
+    do_umount
+    mount -a
+else
+    do_umount
+fi
+

@@ -1,0 +1,31 @@
+[mysqld]
+basedir = /usr
+bind-address = 0.0.0.0
+port = 3306
+binlog_format = ROW
+default-storage-engine = innodb
+innodb_autoinc_lock_mode = 2
+collation-server = utf8_general_ci
+init-connect = SET NAMES utf8
+character-set-server = utf8
+datadir = /var/lib/mysql/
+wsrep_cluster_address = gcomm://{{cluster_addresses}}
+wsrep_provider_options = gmcast.listen_addr=tcp://{{node_address}}:4567;ist.recv_addr={{node_address}}:4568;
+wsrep_node_address = {{node_address}}:4567
+wsrep_sst_receive_address = {{node_address}}:4444
+wsrep_provider = /usr/lib64/galera/libgalera_smm.so
+wsrep_cluster_name = monitor
+wsrep_node_name = {{node_name}}
+wsrep_sst_method = rsync
+wsrep_sst_auth = root:root
+wsrep_slave_threads = 4
+wsrep_on = ON
+max_connections = 10000
+key_buffer_size = 64M
+max_heap_table_size = 64M
+tmp_table_size = 64M
+innodb_buffer_pool_size = 8192M
+innodb_lock_schedule_algorithm = FCFS
+max_allowed_packet = 64M
+innodb_lock_wait_timeout = 90
+

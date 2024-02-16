@@ -1,0 +1,14 @@
+#!/bin/bash
+
+exit_error()
+{
+    echo "ERROR: Zabbix service is not active!" 1>&2
+    exit 1
+}
+systemctl status zabbix-server | grep active > /dev/null 2>&1
+if [ $? -eq 1 ];then
+    systemctl restart zabbix-server nginx php-fpm
+fi
+nodeName=`hostname`
+zabbix_server -R ha_status | grep $nodeName > /dev/null 2>&1 || exit_error
+

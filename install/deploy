@@ -1,0 +1,207 @@
+#!/bin/bash
+
+if which docker > /dev/null 2>&1; then
+    cm=docker
+elif which podman > /dev/null 2>&1; then
+    cm=podman
+else
+    echo "ERROR: No container manager!"
+    exit 1
+fi
+
+cert_src=/etc/pki/ca-trust/source/anchors
+
+echo "Container manager: $cm"
+
+build_image()
+{
+    local name=$1
+
+    sudo docker build \
+            --rm \
+            --add-host depot:10.91.0.20 \
+            --network host \
+            --tag cms:2.0 \
+            image-cms
+}
+
+start_haproxy()
+{
+    # nmcli conn mod eth2.40 ipv4.addresses <local>,<VIP 1>,<VIP 2>
+    dnf install haproxy
+    # /etc/haproxy/haproxy.pem
+    # /etc/haproxy/haproxy.cfg
+}
+
+start_image()
+{
+    echo "INFO: Start image service..."
+    sudo mkdir -p /var/log/cms
+    sudo $cm run -d --name image \
+        --net host \
+        -v /etc/localtime:/etc/localtime:ro \
+        -v $cert_src:$cert_src:ro \
+        -v /etc/cms:/etc/cms:ro \
+        -v /var/log/cms:/var/log/cms:z \
+        -v $HOME/cms/src:/usr/local/cms:z \
+        -v /etc/ceph:/etc/ceph:ro \
+        -v /opt/image-staging:/opt/image-staging:z \
+        -e PYTHONPATH=/usr/local/cms \
+        -w /usr/local/cms/image \
+        cms:2.0 \
+        /usr/bin/bash -c \
+            "update-ca-trust && python3 /usr/local/cms/image/server.py"
+}
+
+start_backup()
+{
+    echo "INFO: Start backup service..."
+    sudo mkdir -p /var/log/cms
+    sudo $cm run -d --name backup \
+        --net host \
+        -v /etc/localtime:/etc/localtime:ro \
+        -v $cert_src:$cert_src:ro \
+        -v /etc/cms:/etc/cms:ro \
+        -v /var/log/cms:/var/log/cms:z \
+        -v $HOME/cms/src:/usr/local/cms:z \
+        -v /root/.ssh:/root/.ssh:ro \
+        -v /etc/ceph:/etc/ceph:ro \
+        -e PYTHONPATH=/usr/local/cms \
+        -w /usr/local/cms/backup \
+        cms:2.0 \
+        /usr/bin/bash -c \
+            "update-ca-trust && python3 /usr/local/cms/backup/server.py"
+}
+
+start_plan()
+{
+    echo "INFO: Start plan service..."
+    sudo mkdir -p /var/log/cms
+    sudo $cm run -d --name plan \
+        --net host \
+        -v /etc/localtime:/etc/localtime:ro \
+        -v $cert_src:$cert_src:ro \
+        -v /etc/cms:/etc/cms:ro \
+        -v /var/log/cms:/var/log/cms:z \
+        -v $HOME/cms/src:/usr/local/cms:z \
+        -v /root/.ssh:/root/.ssh:ro \
+        -v /var/spool/cron:/var/spool/cron:z \
+        -e PYTHONPATH=/usr/local/cms \
+        -w /usr/local/cms/plan \
+        cms:2.0 \
+        /usr/bin/bash -c \
+            "update-ca-trust && python3 /usr/local/cms/plan/server.py"
+}
+
+start_cloudshell()
+{
+    echo "INFO: Start cloudshell service..."
+    sudo mkdir -p /var/log/cms
+    sudo $cm run -d --name cloudshell \
+        --net host \
+        -v /etc/localtime:/etc/localtime:ro \
+        -v $cert_src:$cert_src:ro \
+        -v /etc/cms:/etc/cms:ro \
+        -v /var/log/cms:/var/log/cms:z \
+        -v /root/.ssh:/root/.ssh:ro \
+        -v $HOME/cms/src:/usr/local/cms:z \
+        -e PYTHONPATH=/usr/local/cms \
+        -w /usr/local/cms/cloudshell \
+        cms:2.0 \
+        /usr/bin/bash -c \
+            "update-ca-trust && python3 /usr/local/cms/cloudshell/server.py"
+}
+
+start_builder()
+{
+    echo "INFO: Start builder service..."
+    sudo mkdir -p /var/log/cms
+    sudo mkdir -p /var/lib/cms/nfs
+    sudo $cm run -d --name builder \
+        --net host \
+        -v /etc/localtime:/etc/localtime:ro \
+        -v $cert_src:$cert_src:ro \
+        -v /etc/cms:/etc/cms:ro \
+        -v /var/log/cms:/var/log/cms:z \
+        -v $HOME/cms/src:/usr/local/cms:z \
+        -v /root/.ssh:/root/.ssh:ro \
+        -e PYTHONPATH=/usr/local/cms \
+        -w /usr/local/cms/builder \
+        cms:2.0 \
+        /usr/bin/bash -c \
+            "update-ca-trust && python3 /usr/local/cms/builder/server.py"
+}
+
+start_api()
+{
+    echo "INFO: Start API service..."
+    sudo mkdir -p /var/log/cms
+    sudo $cm run -d --name api \
+        --net host \
+        -v /etc/localtime:/etc/localtime:ro \
+        -v $cert_src:$cert_src:ro \
+        -v /etc/cms:/etc/cms:ro \
+        -v /var/log/cms:/var/log/cms:z \
+        -v $HOME/cms/src:/usr/local/cms:z \
+        -e PYTHONPATH=/usr/local/cms \
+        -w /usr/local/cms/api \
+        cms:2.0 \
+        /usr/bin/bash -c \
+            "update-ca-trust && python3 /usr/local/cms/api/server.py"
+}
+
+start_monitor()
+{
+    echo "INFO: Start monitor service..."
+    sudo mkdir -p /var/log/cms
+    sudo $cm run -d --name monitor \
+        --net host \
+        -v /etc/localtime:/etc/localtime:ro \
+        -v $cert_src:$cert_src:ro \
+        -v /etc/cms:/etc/cms:ro \
+        -v /var/log/cms:/var/log/cms:z \
+        -v $HOME/cms/src:/usr/local/cms:z \
+        -v /root/.ssh:/root/.ssh:ro \
+        -e PYTHONPATH=/usr/local/cms \
+        -w /usr/local/cms/monitor \
+        cms:2.0 \
+        /usr/bin/bash -c \
+            "update-ca-trust && python3 /usr/local/cms/monitor/server.py"
+}
+
+start_mysql()
+{
+    echo "INFO: Start MySQL..."
+    sudo mkdir -p /var/lib/mysql
+    sudo $cm run -d --name mysql \
+        -e MYSQL_ROOT_PASSWORD="Root1234" \
+        -v /etc/localtime:/etc/localtime:ro \
+        -v /var/lib/mysql/:/var/lib/mysql/:z \
+        --net host \
+        mysql:8.0.33
+}
+
+init_mysql()
+{
+    local dbs="image block backup kubernetes plan builder monitor"
+
+    echo "INFO: Create service user..."
+    sudo $cm exec mysql mysql -u root -pRoot1234 -e \
+        "create user if not exists 'cms'@'%' identified by 'Cms@1234';"
+    echo "INFO: Grant service user..."
+    sudo $cm exec mysql mysql -u root -pRoot1234 -e \
+        "grant all on *.* to 'cms'@'%';"
+    echo "INFO: Create databases..."
+    for svc in $dbs; do
+        sudo $cm exec mysql mysql -u root -pRoot1234 -e \
+            "create database $svc;"
+    done
+    echo "INFO: Flush..."
+    sudo $cm exec mysql mysql -u root -pRoot1234 -e \
+        "flush privileges;"
+}
+
+func=$1
+shift
+$func "$@"
+

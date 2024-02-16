@@ -1,0 +1,200 @@
+#!/bin/bash
+
+log()
+{
+    echo $(date +"%Y-%m-%d %H:%M:%S,%3N") $@
+}
+
+wait_for_host()
+{
+    local host=$1
+
+    retry=20
+    while (($retry > 0)); do
+        log INFO "Check $host, retry: $retry."
+        ssh -o ConnectTimeout=3 root@$host date > /dev/null 2>&1
+        if (($? == 0)); then
+            log INFO "Host $host is up."
+            break
+        fi
+        retry=$((retry - 1))
+        sleep 4
+    done
+    if (($retry == 0)); then
+        log ERROR "Timeout!"
+        exit 1
+    fi
+}
+
+set_repo()
+{
+    log INFO "Check repo."
+    if [ ! -d "/etc/yum.repos.d.orig" ]; then
+        mv /etc/yum.repos.d /etc/yum.repos.d.orig
+        mkdir -p /etc/yum.repos.d
+    fi
+    mv -f $tmp_path/depot.repo /etc/yum.repos.d/
+}
+
+disable_selinux()
+{
+    log INFO "Disable SELinux."
+    setenforce 0
+    cat > /etc/selinux/config << __EOF__
+SELINUX=permissive
+SELINUXTYPE=targeted
+__EOF__
+}
+
+install_mariadb()
+{
+    log INFO "Install MariaDB $version and Galera."
+    mv -f $tmp_path/hosts /etc/
+    dnf install -y mariadb-server-$version mariadb-server-galera-$version \
+            galera
+    systemctl enable mariadb
+    mv -f $tmp_path/my.cnf /etc/
+}
+
+install_keepalived()
+{
+    log INFO "Install keepalived."
+    dnf install -y keepalived
+    mv -f $tmp_path/keepalived.conf $tmp_path/check-svc \
+            /etc/keepalived/
+    chmod +x /etc/keepalived/check-svc
+    systemctl enable --now keepalived
+}
+
+op_deploy()
+{
+    local version=$1
+    local ha=$2
+
+    echo ""
+    log INFO "Deploy MariaDB."
+    set_repo
+    disable_selinux
+    install_mariadb $version
+    if [ "$ha" == "true" ]; then
+        install_keepalived
+    fi
+}
+
+op_bootstrap()
+{
+    log INFO "Bootstrap MariaDB."
+    galera_new_cluster
+    sleep 10
+
+    log INFO "Enable remote access for user root."
+    mysql -e "create user 'root'@'%';"
+    mysql -e "grant all on *.* to 'root'@'%';"
+}
+
+op_join()
+{
+    log INFO "Join MariaDB cluster."
+    systemctl start mariadb
+}
+
+help()
+{
+    echo "Help"
+    echo "$self_name deploy" \
+            "--host <host> --id <id> --ha --version <version>"
+    echo "$self_name bootstrap" \
+            "--host <host> --id <id>"
+    echo "$self_name join" \
+            "--host <host> --id <id>"
+}
+
+start()
+{
+    local copy_files host id version ha args_orig
+
+    args_orig="$@"
+    op=$1
+    if [ -z "$op" ]; then help; exit 1; fi
+    shift
+    for item in $@; do
+        if [ ${item:0:2} == "--" ]; then
+            arg_name=$item
+            case $arg_name in
+            --ha)
+                ha=true
+                ;;
+            esac
+            continue
+        fi
+        case $arg_name in
+        --host)
+            host=$item
+            ;;
+        --id)
+            id=$item
+            ;;
+        --version)
+            version=$item
+            ;;
+        *)
+            help; exit 1
+            ;;
+        esac
+    done
+    if [ -z $host ] || [ -z $id ]; then help; exit 1; fi
+
+    tmp_path=/tmp/$id
+    if [ "$self_path" != "$tmp_path" ]; then
+        copy_files=$self_path/$self_name
+        template_path=$self_path/mariadb-template
+    fi
+    case $op in
+    deploy)
+        if [ "$copy_files" ]; then
+            copy_files="$copy_files $tmp_path/*"
+            if [ $ha == "true" ]; then
+                copy_files="$copy_files $template_path/check-svc"
+            fi
+        else
+            op_deploy $version $ha
+        fi
+        ;;
+    bootstrap)
+        if [ "$copy_files" ]; then
+            copy_files="$copy_files"
+        else
+            op_bootstrap
+        fi
+        ;;
+    join)
+        if [ "$copy_files" ]; then
+            copy_files="$copy_files"
+        else
+            op_join
+        fi
+        ;;
+    *)
+        help; exit 1
+        ;;
+    esac
+    if [ "$copy_files" ]; then
+        echo ""
+        wait_for_host $host
+        log INFO "Copy files to $host."
+        ssh root@$host mkdir -p $tmp_path
+        scp $copy_files root@$host:$tmp_path
+        log INFO "Run $self_name on $host."
+        ssh root@$host $tmp_path/$self_name "$args_orig"
+        log INFO "Clean up on $host."
+        ssh root@$host rm -fr $tmp_path
+    fi
+}
+
+
+self_name=$(basename $0)
+self_path=$(dirname $0)
+start "$@"
+
+exit 0
+

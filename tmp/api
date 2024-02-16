@@ -1,0 +1,181 @@
+#!/bin/bash
+
+API_URL=http://127.0.0.1:8102
+USERNAME=dev
+PASSWORD=user1234
+PROJECT_NAME=dev
+
+get_token_unscoped()
+{
+    echo "INFO: Get unscoped token..."
+    curl -s -i -X POST \
+        -H "Content-Type: application/json" \
+        -d "
+    {
+    \"auth\": {
+        \"identity\": {
+            \"methods\": [\"password\"],
+            \"password\": {
+                \"user\": {
+                    \"name\": \"$USERNAME\",
+                    \"password\": \"$PASSWORD\",
+                    \"domain\": { \"id\": \"default\" }
+                }
+            }
+        }
+    }
+    }" \
+        $API_URL/v1/identity/auth/token > /tmp/resp
+}
+
+get_token_scoped()
+{
+    echo "INFO: Get scoped token..."
+    curl -s -i -X POST \
+        -H "Content-Type: application/json" \
+        -d "
+    {
+    \"auth\": {
+        \"identity\": {
+            \"methods\": [\"password\"],
+            \"password\": {
+                \"user\": {
+                    \"name\": \"$USERNAME\",
+                    \"password\": \"$PASSWORD\",
+                    \"domain\": { \"id\": \"default\" }
+                }
+            }
+        },
+        \"scope\": {
+            \"project\": {
+                \"name\": \"$PROJECT_NAME\",
+                \"domain\": { \"name\": \"Default\" }
+            }
+        }
+    }
+    }" \
+        $API_URL/v1/identity/auth/token > /tmp/resp
+}
+
+network_list()
+{
+    echo "INFO: List network..."
+    curl -i -X GET \
+            -H "x-auth-token: $token" \
+            "$API_URL/v1/network/network?name=test"
+    echo
+    echo
+}
+
+network_show()
+{
+    local id=$1
+
+    echo "INFO: Show network $id..."
+    curl -i -X GET \
+            -H "x-auth-token: $token" \
+            $API_URL/v1/network/network/$id
+    echo
+    echo
+}
+
+network_create()
+{
+    local name=$1
+
+    echo "INFO: Create network ..."
+    curl -i -X POST \
+        -H "x-auth-token: $token" \
+        -H "Content-Type: application/json" \
+        -d "
+    {
+    \"network\": {
+        \"name\": \"$name\"
+    }
+    }" \
+        $API_URL/v1/network/network
+    echo
+    echo
+}
+
+router_show()
+{
+    local id=$1
+
+    echo "INFO: Show router $id..."
+    curl -i -X GET \
+            -H "x-auth-token: $token" \
+            $API_URL/v1/network/router/$id
+    echo
+}
+
+router_interface_attach()
+{
+    echo "INFO: Attach router interface."
+    curl -i -X POST \
+        -H "x-auth-token: $token" \
+        -H "Content-Type: application/json" \
+        -d "
+    {
+    \"remove_router_interface\": {
+        \"subnet_id\": \"aee7a73b-dd1e-42b8-b64c-4566b1926476\"
+    }
+    }" \
+        $API_URL/v1/network/router/5166a920-cee4-4aa3-84ea-8c798c44fd80/action
+    echo
+}
+
+get_token()
+{
+    #get_token_unscoped
+    get_token_scoped
+    token=$(cat /tmp/resp | awk "/x-subject-token/"'{print $2}')
+    token=${token//[$'\r\n']}
+}
+
+cmd_project_list()
+{
+    get_token_unscoped
+    token=$(cat /tmp/resp | awk "/x-subject-token/"'{print $2}')
+    token=${token//[$'\r\n']}
+    echo $token
+    curl -i -X GET \
+            -H "x-auth-token: $token" \
+            $API_URL/v1/identity/user/4651acde16764e11b9b718e4d0c8e97e/project
+}
+
+cmd_get_token()
+{
+    get_token_scoped
+    cat /tmp/resp
+}
+
+cmd_network_list()
+{
+    get_token
+    network_list
+}
+
+cmd_network_show()
+{
+    get_token
+    network_show 27ea27c6-3d1e-4d37-ad4a-de2ae1578f1e
+}
+
+cmd_network_create()
+{
+    get_token
+    network_create $1
+}
+
+cmd_test()
+{
+    get_token
+    router_interface_attach
+    #router_show 5166a920-cee4-4aa3-84ea-8c798c44fd80
+}
+
+func=cmd_$1
+shift
+$func "$@"
+

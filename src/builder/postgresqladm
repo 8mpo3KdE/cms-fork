@@ -1,0 +1,257 @@
+#!/bin/bash
+
+log()
+{
+    echo $(date +"%Y-%m-%d %H:%M:%S,%3N") $@
+}
+
+wait_for_host()
+{
+    local host=$1
+
+    retry=20
+    while (($retry > 0)); do
+        log INFO "Check $host, retry: $retry."
+        ssh -o ConnectTimeout=3 root@$host date > /dev/null 2>&1
+        if (($? == 0)); then
+            log INFO "Host $host is up."
+            break
+        fi
+        retry=$((retry - 1))
+        sleep 4
+    done
+    if (($retry == 0)); then
+        log ERROR "Timeout!"
+        exit 1
+    fi
+}
+
+set_repo()
+{
+    log INFO "Check repo."
+    if [ ! -d "/etc/yum.repos.d.orig" ]; then
+        mv /etc/yum.repos.d /etc/yum.repos.d.orig
+        mkdir -p /etc/yum.repos.d
+    fi
+    mv -f $tmp_path/depot.repo /etc/yum.repos.d/
+}
+
+disable_selinux()
+{
+    log INFO "Disable SELinux."
+    setenforce 0
+    cat > /etc/selinux/config << __EOF__
+SELINUX=permissive
+SELINUXTYPE=targeted
+__EOF__
+}
+
+install_postgresql()
+{
+    local version=$1
+
+    log INFO "Install PostgreSQL $version."
+    mv -f $tmp_path/hosts /etc/
+    IFS='.'; a=(${version}); unset IFS
+    major=${a[0]}
+    if (($major >= 15 )); then
+        dnf module enable -y postgresql:$major
+    fi
+    dnf install -y postgresql-server-$version nc
+    systemctl enable postgresql
+}
+
+install_keepalived()
+{
+    log INFO "Install keepalived."
+    dnf install -y keepalived
+    mv -f $tmp_path/keepalived.conf $tmp_path/check-svc \
+            /etc/keepalived/
+    chmod +x /etc/keepalived/check-svc
+    systemctl enable keepalived
+}
+
+op_deploy()
+{
+    local version=$1
+    local ha=$2
+
+    echo ""
+    log INFO "Deploy PostgreSQL."
+    set_repo
+    disable_selinux
+    install_postgresql $version
+    if [ "$ha" == "true" ]; then
+        install_keepalived
+    fi
+}
+
+op_start_primary()
+{
+    log INFO "Start the primary."
+    postgresql-setup --initdb
+    systemctl start postgresql
+    pwd=$(pwd)
+    cd /var/lib/pgsql
+    pgsql_cmd="sudo -u postgres psql -c"
+    $pgsql_cmd "create role replica with replication login password 'replica';"
+    $pgsql_cmd "create role root with superuser createdb createrole inherit \
+            bypassrls login password 'Root1234';"
+    sudo -u postgres cp -f $tmp_path/postgresql.conf /var/lib/pgsql/data/
+    sudo -u postgres cp -f $tmp_path/pg_hba.conf /var/lib/pgsql/data/
+    cd $pwd
+    systemctl restart postgresql
+    systemctl is-enabled keepalived > /dev/null 2>&1
+    if [ $? == 0 ]; then
+        systemctl start keepalived
+    fi
+}
+
+op_start_standby()
+{
+    local primary=$1
+
+    log INFO "Start the standby."
+    systemctl stop postgresql
+    rm -rf /var/lib/pgsql/data/*
+    pwd=$(pwd)
+    cd /var/lib/pgsql
+    sudo_cmd="sudo -u postgres"
+    $sudo_cmd pg_basebackup -h $primary -D /var/lib/pgsql/data \
+            -p 5432 -X stream -U replica -w
+    file="/var/lib/pgsql/data/standby.signal"
+    $sudo_cmd touch $file
+    $sudo_cmd chmod 600 $file
+    $sudo_cmd cp -f $tmp_path/postgresql.conf /var/lib/pgsql/data/
+    $sudo_cmd cp -f $tmp_path/pg_hba.conf /var/lib/pgsql/data/
+    cd $pwd
+    systemctl restart postgresql
+    systemctl is-enabled keepalived > /dev/null 2>&1
+    if [ $? == 0 ]; then
+        systemctl start keepalived
+    fi
+}
+
+op_create_slot()
+{
+    local name=$1
+
+    log INFO "Create replication slot."
+    pwd=$(pwd)
+    cd /var/lib/pgsql
+    pgsql_cmd="sudo -u postgres psql -c"
+    $pgsql_cmd "select * from pg_create_physical_replication_slot('$name');"
+    cd $pwd
+}
+
+help()
+{
+    echo "Help"
+    echo "$self_name deploy" \
+            "--host <host> --id <id> --ha --version <version>"
+    echo "$self_name start-primary" \
+            "--host <host> --id <id>"
+    echo "$self_name start-standby" \
+            "--host <host> --id <id> --primary <primary address>"
+    echo "$self_name create-slot" \
+            "--host <host> --id <id> --name <slot name>"
+}
+
+start()
+{
+    local copy_files host id version ha name primary args_orig
+
+    args_orig="$@"
+    op=$1
+    if [ -z "$op" ]; then help; exit 1; fi
+    shift
+    for item in $@; do
+        if [ ${item:0:2} == "--" ]; then
+            arg_name=$item
+            case $arg_name in
+            --ha)
+                ha=true
+                ;;
+            esac
+            continue
+        fi
+        case $arg_name in
+        --host)
+            host=$item
+            ;;
+        --id)
+            id=$item
+            ;;
+        --version)
+            version=$item
+            ;;
+        --primary)
+            primary=$item
+            ;;
+        --name)
+            name=$item
+            ;;
+        *)
+            help; exit 1
+            ;;
+        esac
+    done
+    if [ -z $host ] || [ -z $id ]; then help; exit 1; fi
+
+    tmp_path=/tmp/$id
+    if [ "$self_path" != "$tmp_path" ]; then
+        copy_files=$self_path/$self_name
+    fi
+    case $op in
+    deploy)
+        if [ "$copy_files" ]; then
+            copy_files="$copy_files $tmp_path/*"
+        else
+            op_deploy $version $ha
+        fi
+        ;;
+    start-primary)
+        if [ "$copy_files" ]; then
+            copy_files="$copy_files $tmp_path/*"
+        else
+            op_start_primary
+        fi
+        ;;
+    start-standby)
+        if [ "$copy_files" ]; then
+            copy_files="$copy_files $tmp_path/*"
+        else
+            op_start_standby $primary
+        fi
+        ;;
+    create-slot)
+        if [ "$copy_files" ]; then
+            copy_files="$copy_files"
+        else
+            op_create_slot $name
+        fi
+        ;;
+    *)
+        help; exit 1
+        ;;
+    esac
+    if [ "$copy_files" ]; then
+        echo ""
+        wait_for_host $host
+        log INFO "Copy files to $host."
+        ssh root@$host mkdir -p $tmp_path
+        scp $copy_files root@$host:$tmp_path
+        log INFO "Run $self_name on $host."
+        ssh root@$host $tmp_path/$self_name "$args_orig"
+        log INFO "Clean up on $host."
+        ssh root@$host rm -fr $tmp_path
+    fi
+}
+
+
+self_name=$(basename $0)
+self_path=$(dirname $0)
+start "$@"
+
+exit 0
+

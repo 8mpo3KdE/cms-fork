@@ -1,0 +1,192 @@
+variant: fcos
+version: 1.4.0
+passwd:
+  users:
+    - name: core
+      #password_hash: $y$j9T$Vk6xgdr05n4BXaz3rMvBw0$Pr63J3H.u4q2yotAJSrnzB5pQaDG/Yyx5sWH93tbwi8
+      ssh_authorized_keys:
+        - {{ssh_key}}
+storage:
+  files:
+    - path: /etc/hostname
+      mode: 0644
+      contents:
+        inline: {{hostname}}
+    - path: /etc/NetworkManager/system-connections/ens3.nmconnection
+      mode: 0600
+      contents:
+        inline: |
+          [connection]
+          id=ens3
+          type=ethernet
+          interface-name=ens3
+          [ipv4]
+          address1={{node_addrs[idx]}}/{{node_prefix_len}}
+{% if api_access == "corp" and service_access == "corp" %}
+          gateway={{corp_gw}}
+{% else %}
+          gateway={{public_gw}}
+          route2=10.0.0.0/8,{{corp_gw}}
+          route3=172.16.0.0/16,{{corp_gw}}
+{% endif %}
+          route1=169.254.169.254,{{node_metadata_addr}}
+          dns=172.16.100.100;172.16.100.80;
+          dns-search={{domain}}
+          may-fail=false
+          method=manual
+          [ipv6]
+          method=disabled
+    - path: /etc/kubernetes/manifests/haproxy.yaml
+      mode: 0644
+      contents:
+        inline: |
+          apiVersion: v1
+          kind: Pod
+          metadata:
+            name: haproxy
+            namespace: kube-system
+          spec:
+            containers:
+            - image: {{registry_fqdn}}/haproxy/haproxy:2.5.7
+              name: haproxy
+              livenessProbe:
+                failureThreshold: 8
+                httpGet:
+                  host: localhost
+                  path: /healthz
+                  port: {{api_port_frontend}}
+                  scheme: HTTPS
+              volumeMounts:
+              - mountPath: /usr/local/etc/haproxy/haproxy.cfg
+                name: haproxyconf
+                readOnly: true
+            hostNetwork: true
+            volumes:
+            - hostPath:
+                path: /etc/haproxy/haproxy.cfg
+                type: FileOrCreate
+              name: haproxyconf
+    - path: /etc/kubernetes/manifests/keepalived.yaml
+      mode: 0644
+      contents:
+        inline: |
+          apiVersion: v1
+          kind: Pod
+          metadata:
+            name: keepalived
+            namespace: kube-system
+          spec:
+            containers:
+            - image: {{registry_fqdn}}/osixia/keepalived:2.0.20
+              name: keepalived
+              securityContext:
+                capabilities:
+                  add:
+                  - NET_ADMIN
+                  - NET_BROADCAST
+                  - NET_RAW
+              volumeMounts:
+              - mountPath: /usr/local/etc/keepalived/keepalived.conf
+                name: config
+              - mountPath: /etc/keepalived/check-api
+                name: check
+            hostNetwork: true
+            volumes:
+            - hostPath:
+                path: /etc/keepalived/keepalived.conf
+              name: config
+            - hostPath:
+                path: /etc/keepalived/check-api
+              name: check
+    - path: /etc/keepalived/keepalived.conf
+      mode: 0644
+      contents:
+        inline: |
+          vrrp_script check-api {
+              script "/etc/keepalived/check-api"
+              interval 2
+              weight 20
+          }
+          vrrp_instance int-vip-{{api_vrid}} {
+              state MASTER
+              interface ens3
+              virtual_router_id {{api_vrid}}
+              priority 100
+              advert_int 1
+              virtual_ipaddress {
+                  {{api_int_vip}}/32
+              }
+              authentication {
+                  auth_type PASS
+                  auth_pass VRRP_PASS
+              }
+              track_script {
+                  check-api
+              }
+          }
+    - path: /etc/keepalived/check-api
+      mode: 0755
+      contents:
+        inline: |
+          #!/bin/sh
+
+          exit_error() {
+              echo "ERROR: $*" 1>&2
+              exit 1
+          }
+
+          # Check API service on localhost.
+          curl --silent --max-time 2 --insecure \
+                  https://localhost:{{api_port_backend}}/ -o /dev/null \
+                  || exit_error "GET https://localhost:{{api_port_backend}}/"
+
+          # Check HAProxy by checking API service via VIP if it's on localhost.
+          if ip addr | grep -q {{api_int_vip}}; then
+              curl --silent --max-time 2 --insecure \
+                      https://{{api_int_vip}}:{{api_port_frontend}}/ -o /dev/null \
+                      || exit_error "GET https://{{api_int_vip}}:{{api_port_frontend}}/"
+          fi
+    - path: /etc/haproxy/haproxy.cfg
+      mode: 0644
+      contents:
+        inline: |
+          global
+              log /dev/log local0
+              log /dev/log local1 notice
+              daemon
+
+          defaults
+              mode                    http
+              log                     global
+              option                  httplog
+              option                  dontlognull
+              option http-server-close
+              option forwardfor       except 127.0.0.0/8
+              option                  redispatch
+              retries                 1
+
+          listen apiserver
+              bind *:{{api_port_frontend}}
+              mode tcp
+              option tcplog
+              option httpchk GET /healthz
+              option ssl-hello-chk
+              http-check expect status 200
+          {% if node_addrs[0] %}
+              server controller-1 {{node_addrs[0]}}:{{api_port_backend}} check inter 2000 rise 2 fall 5
+          {% endif %}
+          {% if node_addrs[1] %}
+              server controller-2 {{node_addrs[1]}}:{{api_port_backend}} check inter 2000 rise 2 fall 5
+          {% endif %}
+          {% if node_addrs[2] %}
+              server controller-3 {{node_addrs[2]}}:{{api_port_backend}} check inter 2000 rise 2 fall 5
+          {% endif %}
+systemd:
+  units:
+    - name: docker.service
+      mask: true
+    - name: zincati.service
+      mask: true
+    - name: afterburn-sshkeys@core.service
+      mask: true
+

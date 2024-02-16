@@ -1,0 +1,10 @@
+#!/bin/sh
+
+exit_error() {
+    echo "ERROR: $*" 1>&2
+    exit 1
+}
+
+systemctl is-active mariadb > /dev/null 2>&1 \
+        || exit_error "MariaDB inactive!"
+

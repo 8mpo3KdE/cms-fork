@@ -1,0 +1,541 @@
+#!/bin/bash
+service_proxy=$1
+product_version=$2
+os_version=$3
+depot_fqdn=$4
+
+set_repo()
+{
+    echo "INFO: Setup depot repo."
+    local depot=/etc/yum.repos.d/depot.repo
+    if [ -f $depot ]; then
+        return
+    fi
+    rm /etc/yum.repos.d/*
+    cat > /etc/yum.repos.d/depot.repo << EOF
+[BaseOS]
+name=BaseOS
+baseurl=http://$depot_fqdn/$product_version/$os_version/BaseOS
+proxy=http://$service_proxy:3128
+enabled=1
+gpgcheck=0
+priority=9
+[AppStream]
+name=AppStream
+baseurl=http://$depot_fqdn/$product_version/$os_version/AppStream
+proxy=http://$service_proxy:3128
+enabled=1
+gpgcheck=0
+priority=9
+[zabbix]
+name=zabbix
+baseurl=http://$depot_fqdn/$product_version/$os_version/zabbix-6.4
+proxy=http://$service_proxy:3128
+enabled=1
+gpgcheck=0
+priority=9
+[elasticsearch]
+name=elasticsearch
+baseurl=http://$depot_fqdn/$product_version/$os_version/elasticsearch
+proxy=http://$service_proxy:3128
+enabled=1
+gpgcheck=0
+priority=9
+[docker]
+name=docker
+baseurl=http://$depot_fqdn/$product_version/$os_version/docker
+proxy=http://$service_proxy:3128
+enabled=1
+gpgcheck=0
+priority=9
+
+EOF
+}
+
+set_cert()
+{
+    local cert=/etc/pki/ca-trust/source/anchors/client.pem
+
+    echo "INFO: Check client cert."
+    if [ -f $cert ]; then
+        return
+    fi
+    echo "INFO: Setup client cert."
+    export http_proxy=http://$service_proxy:3128
+    curl http://$depot_fqdn/cert/client/client.pem -o $cert
+    unset http_proxy
+    update-ca-trust
+}
+
+set_depot(){
+    dnf install createrepo wget nginx -y
+    export http_proxy=http://$service_proxy:3128
+    curl http://$depot_fqdn/$product_version/$os_version/monitor/server/nginx.conf -o /etc/nginx/nginx.conf
+    wget --reject-regex '.*\.html*' -r -np $depot_fqdn/$product_version/$os_version/monitor/depot/
+    find $depot_fqdn -name "index.html*" -type f -delete
+    rm -rf /opt/depot
+    mv $depot_fqdn/$product_version/$os_version/monitor/depot/ /opt/depot
+    rm -rf $depot_fqdn
+    createrepo /opt/depot/centos8
+    createrepo /opt/depot/centos9
+    chmod -R 755 /opt/depot/
+    chown -R nginx:nginx /opt/depot/
+    chcon -Rt httpd_sys_content_t /opt/depot/
+    systemctl enable nginx
+    systemctl restart nginx
+    unset http_proxy
+}
+
+install_zabbix(){
+    echo "INFO: install zabbix server."
+    dnf install -y zabbix-server-mysql zabbix-sql-scripts zabbix-selinux-policy zabbix-web-mysql zabbix-nginx-conf zabbix-java-gateway
+    zcat /usr/share/zabbix-sql-scripts/mysql/server.sql.gz | mysql --default-character-set=utf8mb4 -uzabbix -pZabbix1234 zabbix
+    mysql -u root -p$ROOT_PASSWORD -e "set global log_bin_trust_function_creators = 0;"
+    echo "INFO: Configurate Zabbix Server."
+    sudo sed -i -e 's/# DBPassword=/DBPassword=Zabbix1234/g'  /etc/zabbix/zabbix_server.conf
+    sudo sed -i -e "s/# DBHost=localhost/DBHost=127.0.0.1/g"  /etc/zabbix/zabbix_server.conf
+    sudo sed -i -e "s/# DBPort=/DBPort=3306/g"  /etc/zabbix/zabbix_server.conf
+    sudo sed -i -e "s/# CacheSize=32M/CacheSize=32M/g"  /etc/zabbix/zabbix_server.conf
+    sudo sed -i -e "s/# ValueCacheSize=8M/ValueCacheSize=4096M/g"  /etc/zabbix/zabbix_server.conf
+    sudo echo "WebServiceURL=http://zabbix-web-service:10053/report" >> /etc/zabbix/zabbix_server.conf
+    sudo sed -i -e "s/#        listen          8080/        listen          8080/g"  /etc/nginx/conf.d/zabbix.conf
+    sudo sed -i -e "s/#        server_name     example.com/        server_name     zabbix/g"  /etc/nginx/conf.d/zabbix.conf
+    export http_proxy=http://$service_proxy:3128
+    curl http://$depot_fqdn/$product_version/$os_version/monitor/server/zabbix.conf.php -o /etc/zabbix/web/zabbix.conf.php
+    unset http_proxy
+    sudo setsebool -P zabbix_can_network on
+    sudo setsebool -P httpd_can_connect_zabbix on
+    sudo setsebool -P httpd_can_network_connect_db on
+    echo "INFO: Start Zabbix server..."
+    systemctl enable zabbix-server nginx php-fpm
+    systemctl restart zabbix-server nginx php-fpm
+
+}
+
+set_zabbix()
+{
+    echo "INFO: setup zabbix config."
+    dnf install -y jq
+    echo "INFO: Waiting for zabbix server to finish setup..."
+    end_time=$((SECONDS+300))
+    while [[ $SECONDS -lt $end_time ]]; do
+        response=$(curl -s -X POST -H 'Content-Type: application/json' -d '{
+            "jsonrpc": "2.0",
+            "method": "apiinfo.version",
+            "params": {},
+            "id": 1
+        }' http://127.0.0.1:8080/api_jsonrpc.php)
+        if echo "$response" | jq -e '.result' > /dev/null; then
+            echo "INFO: Zabbix server is up and running!"
+            break
+        else
+            sleep 10
+        fi
+    done
+    if [[ $SECONDS -ge $end_time ]]; then
+        echo "ERROR: Timed out waiting for Zabbix server to start."
+        exit 1
+    fi
+    echo "INFO: Setup zabbix config."
+
+ZABBIX_API="http://127.0.0.1:8080/api_jsonrpc.php"
+
+TOKEN=$(curl -s -X POST -H 'Content-Type: application/json' -d '{
+    "jsonrpc": "2.0",
+    "method": "user.login",
+    "params": {
+        "username": "Admin",
+        "password": "zabbix"
+    },
+    "id": 1
+}' $ZABBIX_API | jq -r '.result')
+
+HOST_ID=$(curl -s -X POST -H 'Content-Type: application/json' -d '{
+    "jsonrpc": "2.0",
+    "method": "host.get",
+    "params": {
+        "filter": {
+            "host": ["Zabbix server"]
+        }
+    },
+    "auth": "'$TOKEN'",
+    "id": 2
+}' $ZABBIX_API | jq -r '.result[0].hostid')
+
+curl -X POST -H 'Content-Type: application/json' -d '{
+    "jsonrpc": "2.0",
+    "method": "host.delete",
+    "params": [
+        "'$HOST_ID'"
+    ],
+    "auth": "'$TOKEN'",
+    "id": 3
+}' $ZABBIX_API
+
+GROUP_ID=$(curl -s -X POST -H 'Content-Type: application/json' -d '{
+    "jsonrpc": "2.0",
+    "method": "hostgroup.create",
+    "params": {
+        "name": "Templates/Operating systems"
+    },
+    "auth": "'$TOKEN'",
+    "id": 4
+}' $ZABBIX_API | jq -r '.result["groupids"][0]')
+
+TEMPLATE_ID=$(curl -s -X POST -H 'Content-Type: application/json' -d '{
+    "jsonrpc": "2.0",
+    "method": "template.get",
+    "params": {
+        "filter": {
+            "host": ["Linux by Zabbix agent active"]
+        }
+    },
+    "auth": "'$TOKEN'",
+    "id": 5
+}' $ZABBIX_API | jq -r '.result[0].templateid')
+
+curl -X POST -H 'Content-Type: application/json' -d '{
+    "jsonrpc": "2.0",
+    "method": "action.create",
+    "params": {
+        "name": "add_host",
+        "eventsource": 2,
+        "status": 0,
+        "filter": {
+            "evaltype": 0,
+            "conditions": [
+                {
+                    "conditiontype": 24,
+                    "operator": 8,
+                    "value": "logs"
+                }
+            ]
+        },
+        "operations": [
+            {
+                "operationtype": 2
+            },
+            {
+                "operationtype": 4,
+                "opgroup": [
+                    {
+                        "groupid": "'$GROUP_ID'"
+                    }
+                ]
+            },
+            {
+                "operationtype": 6,
+                "optemplate": [
+                    {
+                        "templateid": "'$TEMPLATE_ID'"
+                    }
+                ]
+            }
+        ]
+    },
+    "auth": "'$TOKEN'",
+    "id": 6
+}' $ZABBIX_API
+
+curl -s -X POST -H 'Content-Type: application/json' -d '{
+    "jsonrpc": "2.0",
+    "method": "housekeeping.update",
+    "params": {
+        "hk_history_mode": 1,
+        "hk_history_global": 1,
+        "hk_history": "30d",
+        "hk_trends_mode": 1,
+        "hk_trends_global": 1,
+        "hk_trends": "90d"
+    },
+    "auth": "'$TOKEN'",
+    "id": 7
+}' $ZABBIX_API
+
+echo "zabbix has been set up."
+}
+
+install_elastic()
+{
+    echo "INFO: install elasticsearch."
+    sudo dnf install -y elasticsearch
+
+    echo "INFO: Check vm.max_map_count..."
+    if [ "$(sysctl vm.max_map_count | awk '{print $3}')" != "262144" ]; then
+        echo "INFO: Update vm.max_map_count..."
+        echo "vm.max_map_count = 262144" >> /etc/sysctl.conf
+        sysctl -p
+    fi
+
+    export http_proxy=http://$service_proxy:3128
+    local es_conf=/etc/elasticsearch/elasticsearch.yml
+    curl http://$depot_fqdn/$product_version/$os_version/monitor/server/elasticsearch.yml -o $es_conf
+    sudo touch  /etc/elasticsearch/jvm.options.d/heap_size.options
+    sudo cat >> /etc/elasticsearch/jvm.options.d/heap_size.options << EOF
+-Xms2048m
+-Xmx2048m
+EOF
+    sudo mkdir /etc/systemd/system/elasticsearch.service.d/
+    sudo touch /etc/systemd/system/elasticsearch.service.d/override.conf
+    sudo cat >> /etc/systemd/system/elasticsearch.service.d/override.conf << EOF
+[Service]
+LimitMEMLOCK=infinity
+EOF
+
+    echo "INFO: install kibana."
+    sudo dnf install -y kibana
+    local kibana_conf=/etc/kibana/kibana.yml
+    curl http://$depot_fqdn/$product_version/$os_version/monitor/server/kibana.yml -o $kibana_conf
+
+    systemctl daemon-reload
+    systemctl enable elasticsearch kibana
+    systemctl restart elasticsearch kibana
+    /usr/share/elasticsearch/bin/elasticsearch-users  useradd admin --password User1234 --roles superuser,kibana_system
+    unset http_proxy
+}
+
+install_mariadb()
+{
+    echo "INFO: Start Mariadb..."
+    dnf install -y galera mariadb-server mariadb-server-galera
+    cat >> /etc/my.cnf <<EOF
+[mysqld]
+basedir = /usr
+bind-address = 127.0.0.1
+port = 3306
+binlog_format = ROW
+default-storage-engine = innodb
+innodb_autoinc_lock_mode = 2
+collation-server = utf8_general_ci
+init-connect = SET NAMES utf8
+character-set-server = utf8
+datadir = /var/lib/mysql/
+wsrep_provider = /usr/lib64/galera/libgalera_smm.so
+wsrep_cluster_name = monitor
+wsrep_sst_method = rsync
+wsrep_sst_auth = root:root
+wsrep_slave_threads = 4
+wsrep_on = OFF
+max_connections = 10000
+key_buffer_size = 64M
+max_heap_table_size = 64M
+tmp_table_size = 64M
+innodb_buffer_pool_size = 8192M
+innodb_lock_schedule_algorithm = FCFS
+max_allowed_packet = 64M
+innodb_lock_wait_timeout = 90
+EOF
+    systemctl enable --now mariadb
+    ROOT_PASSWORD='Root1234'
+    echo -e "\nn\nn\ny\ny\ny\ny" | mysql_secure_installation
+    mysql -u root -proot -e "create database zabbix character set utf8mb4 collate utf8mb4_bin;"
+    mysql -u root -proot -e "create user 'zabbix'@'%' identified by 'Zabbix1234';"
+    mysql -u root -proot -e "grant all privileges on zabbix.* to 'zabbix'@'%';"
+    mysql -u root -proot -e "create user 'root'@'%' identified by 'Root1234';"
+    mysql -u root -proot -e "grant all privileges on zabbix.* to 'root'@'%';"
+    mysql -u root -proot -e "ALTER USER 'root'@'localhost' IDENTIFIED VIA mysql_native_password USING PASSWORD('Root1234');"
+    mysql -u root -pRoot1234 -e "grant all privileges on zabbix.* to 'root'@'localhost';"
+    mysql -u root -pRoot1234 -e "SET GLOBAL log_bin_trust_function_creators = 1;"
+    mysql -u root -pRoot1234 -e "FLUSH PRIVILEGES;"
+}
+
+set_elastic()
+{
+    echo "INFO: setup elastic config"
+
+    curl -X POST -u admin:User1234 \
+    "http://localhost:9200/_security/role/log_sender" \
+    -H 'Content-Type: application/json' -d '
+    {
+    "indices" : [
+    {
+        "names" : [ "*" ],
+        "privileges" : ["write", "create_doc","create_index"]
+    }
+    ]
+    }'
+
+    curl -XPOST -u admin:User1234 -H 'Content-Type: application/json' -d '
+    {
+    "password" : "sendlog",
+    "roles" : ["log_sender"],
+    "full_name" : "Log Sender"
+    }' http://localhost:9200/_security/user/sender
+
+    curl -X PUT -u admin:User1234 "http://localhost:9200/_ilm/policy/30-days-default" -H 'Content-Type: application/json' -d '
+    {
+        "policy": {
+            "phases": {
+                "warm": {
+                    "min_age": "7d",
+                    "actions": {
+                        "shrink": {
+                            "number_of_shards": 1
+                        },
+                        "forcemerge": {
+                            "max_num_segments": 1
+                        }
+                    }
+                },
+                "hot": {
+                    "min_age": "0ms",
+                    "actions": {}
+                },
+                "delete": {
+                    "min_age": "30d",
+                    "actions": {
+                        "delete": {
+                            "delete_searchable_snapshot": true
+                        }
+                    }
+                }
+            }
+        }
+    }'
+
+    curl -X PUT -u admin:User1234 "http://localhost:9200/_index_template/log" -H 'Content-Type: application/json' -d '
+    {
+    "index_patterns": ["log-*"],
+    "template": {
+        "settings": {
+        "index.lifecycle.name": "30-days-default"
+        }
+    }
+    }'
+
+    curl -X PUT -u admin:User1234 "http://localhost:9200/_index_template/filebeat" -H 'Content-Type: application/json' -d '
+    {
+    "index_patterns": ["filebeat-*"],
+    "template": {
+        "settings": {
+        "index.lifecycle.name": "30-days-default"
+        }
+    }
+    }'
+
+    echo "INFO: setup elastic complete"
+}
+
+set_kibana(){
+    echo "INFO: set kibana log"
+    systemctl status kibana | grep active > /dev/null 2>&1
+    if (($? == 0)); then
+        sleep 5
+        curl -X POST \
+        "http://127.0.0.1:5601/api/saved_objects/infrastructure-ui-source/default" \
+        -H "kbn-xsrf: true" \
+        -H "Content-Type: application/json" \
+        -u "admin:User1234" \
+        -d '{
+        "attributes": {
+           "name": "Default",
+           "description": "",
+           "metricAlias": "metrics-*,metricbeat-*",
+           "logIndices": {
+               "type": "index_name",
+               "indexName": "logs-*,filebeat-*,kibana_sample_data_logs*,monitor*"
+           },
+           "fields": {
+               "container": "container.id",
+               "host": "host.name",
+               "message": ["message", "@message"],
+               "pod": "kubernetes.pod.uid",
+               "tiebreaker": "_doc",
+               "timestamp": "@timestamp"
+           }
+        }
+        }'
+    fi
+}
+
+set_zabbix_agent()
+{
+    echo "INFO: install zabbix agent."
+    dnf install -y zabbix-agent2 zabbix-agent2-plugin-*
+    sudo sed -i -e "s/Hostname=Zabbix server/Hostname=monitor-server/g"  /etc/zabbix/zabbix_agent2.conf
+    sudo sed -i -e "s/# HostMetadata=/HostMetadata=logs/g"  /etc/zabbix/zabbix_agent2.conf
+    systemctl enable zabbix-agent2
+    systemctl restart zabbix-agent2
+}
+
+set_rsyslog()
+{
+    echo "INFO: setup rsyslog."
+    dnf install -y rsyslog-elasticsearch
+    export http_proxy=http://$service_proxy:3128
+    curl http://$depot_fqdn/$product_version/$os_version/monitor/server/rsyslog.conf -o \
+    /etc/rsyslog.conf
+    systemctl restart rsyslog
+    unset http_proxy
+}
+
+other_install()
+{
+    dnf install -y haproxy
+    dnf install -y keepalived
+}
+
+set_docker_ce()
+{
+    echo "INFO: Install Docker CE."
+    dnf install -y docker-ce
+    mkdir -p /etc/docker
+    cat > /etc/docker/daemon.json << EOF
+{
+    "bridge": "none",
+    "proxies": {"https-proxy": "http://$service_proxy:3128"}
+}
+EOF
+    systemctl enable docker
+    systemctl restart docker
+    iptables -P FORWARD ACCEPT
+}
+
+install_prometheus()
+{
+    echo "INFO: Install Prometheus."
+    mkdir /etc/prometheus
+    cat > /etc/prometheus/prometheus.yml << EOF
+global:
+  scrape_interval:     15s
+  evaluation_interval: 15s
+  external_labels:
+    replica: prometheus-server
+
+rule_files:
+  # - "first.rules"
+  # - "second.rules"
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ['localhost:9090']
+EOF
+    docker pull prom/prometheus
+    docker run -d --name prometheus-server \
+    -v /etc/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml --net host prom/prometheus
+}
+
+update_docker_policy()
+{
+    echo "INFO: update docker policy."
+    docker ps -aq | xargs docker update --restart=always
+}
+
+set_repo
+set_cert
+set_docker_ce
+set_depot
+install_mariadb
+install_zabbix
+install_elastic
+install_prometheus
+set_zabbix
+set_zabbix_agent
+set_elastic
+set_kibana
+set_rsyslog
+update_docker_policy
+other_install
+echo "INFO: Done monitor-server setup."
+

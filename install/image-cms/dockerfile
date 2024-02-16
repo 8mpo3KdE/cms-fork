@@ -1,0 +1,18 @@
+FROM centos-stream-9:20230918
+
+RUN rm -f /etc/yum.repos.d/*
+COPY depot.repo /etc/yum.repos.d/
+
+RUN dnf install -y python3-devel mysql-devel gcc make
+RUN python3 -m pip install --upgrade pip
+RUN python3 -m pip install fastapi==0.100.0 uvicorn[standard]==0.22.0 \
+        aiomysql==0.2.0 SQLAlchemy[asyncio]==2.0.20 mysqlclient==2.2.0 \
+        aiohttp==3.8.5 aiofiles==23.2.1 cryptography==41.0.2 paramiko==3.2.0 \
+        jwcrypto==1.5.0
+RUN dnf install -y python3-requests python3-jinja2 mysql ceph-common \
+        openssh-clients qemu-img qemu-kvm-block-rbd crontabs pv
+RUN curl http://depot/butane/butane-x86_64-unknown-linux-gnu \
+        -o /usr/local/bin/butane
+RUN chmod +x /usr/local/bin/butane
+RUN rm -f /etc/yum.repos.d/depot.repo
+

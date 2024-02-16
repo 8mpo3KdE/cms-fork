@@ -1,0 +1,16 @@
+kind: Secret
+apiVersion: v1
+metadata:
+  name: cloud-conf
+  namespace: kube-system
+data:
+  cloud.conf: {{cloud_conf}}
+---
+kind: ConfigMap
+apiVersion: v1
+metadata:
+  name: cloud-cert
+  namespace: kube-system
+data:
+  ca-bundle.pem: |
+

@@ -1,0 +1,76 @@
+#!/bin/sh
+
+data_path=/var/lib/pgsql/data
+conf=$data_path/postgresql.conf
+ssn=synchronous_standby_names
+
+log()
+{
+    return
+    echo $(date +"%Y-%m-%d %H:%M:%S,%3N") "$1" "$2" >> /tmp/check.log
+}
+
+primary_on_master()
+{
+    log INFO "primary on master"
+
+    check_names="{{other_names}}"
+    live_names=""
+    count=0
+    for name in $check_names; do
+        nc -w 1 -z $name 5432 > /dev/null 2>&1
+        if [ $? == 0 ]; then
+            live_names="$live_names,$name"
+            count=$((count + 1))
+        fi
+    done
+    live_names=${live_names:1}
+    line=$(grep "synchronous_standby_names" $conf)
+
+    if ((count == 0)); then
+        log INFO "no standby"
+        if [[ "$line" != *"''"* ]]; then
+            log INFO "Update to no standby"
+            sed -i "s/^$ssn.*/$ssn = ''/" $conf
+            sudo -u postgres pg_ctl -D $data_path reload
+        fi
+    else
+        log INFO "$count standby"
+        if [[ "$line" != *"FIRST $count"* ]]; then
+            log INFO "Update to $count standby"
+            sed -i "s/^$ssn.*/$ssn = 'FIRST $count ($live_names)'/" $conf
+            sudo -u postgres pg_ctl -D $data_path reload
+        fi
+
+    fi
+}
+
+standby_on_master()
+{
+    log INFO "standby on master"
+    sed -i "s/^$ssn.*/$ssn = ''/" $conf
+    sudo -u postgres pg_ctl -D $data_path reload
+    sudo -u postgres pg_ctl -D $data_path promote
+}
+
+systemctl is-active postgresql > /dev/null 2>&1
+if [ $? != 0 ]; then
+    echo "ERROR: postgresql inactive!" 1>&2
+    exit 1
+fi
+
+cd $data_path
+ip a | grep {{vip}} > /dev/null 2>&1
+if [ $? == 0 ]; then
+    read_only=$(psql postgres -qt -c "show transaction_read_only;")
+    if [ $read_only == "off" ]; then
+        primary_on_master
+    else
+        standby_on_master
+    fi
+else
+    log INFO "on_backup"
+fi
+
+exit 0
+

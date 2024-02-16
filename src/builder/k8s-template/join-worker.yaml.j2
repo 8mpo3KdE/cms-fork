@@ -1,0 +1,19 @@
+kind: JoinConfiguration
+apiVersion: kubeadm.k8s.io/v1beta3
+nodeRegistration:
+  criSocket: unix:///run/crio/crio.sock
+  #criSocket: unix:///run/containerd/containerd.sock
+  kubeletExtraArgs:
+    volume-plugin-dir: /opt/libexec/kubernetes/kubelet-plugins/volume/exec/
+    cloud-provider: external
+    node-ip: __node_ip__
+{% if node_labels %}
+    node-labels: {{node_labels}}
+{% endif %}
+discovery:
+  bootstrapToken:
+    token: {{token}}
+    apiServerEndpoint: {{api_name}}:{{api_port_frontend}}
+    caCertHashes:
+    - {{cert_hash}}
+

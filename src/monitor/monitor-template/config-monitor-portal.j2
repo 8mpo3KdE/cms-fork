@@ -1,0 +1,528 @@
+#!/bin/sh
+
+user={{monitor_username}}
+pwd={{monitor_password}}
+org={{monitor_org}}
+monitor_ui_host=""
+cluster_hosts=""
+external_address=""
+internal_address=""
+virtual_address=""
+interface_addresses=""
+deleted="False"
+admin_user=monitorAdmin
+admin_pwd=Cms20admin
+
+user_id=0
+org_id=0
+
+zabbix_user=Admin
+zabbix_passwd=zabbix
+zabbix_ds_uid=""
+
+es_user=admin
+es_passwd=User1234
+es_ds_uid=""
+
+pm_ds_uid=""
+
+single=0
+
+
+exit_error() {
+    echo "ERROR: $*" 1>&2
+    exit 1
+}
+
+wait_for_change()
+{
+    count=0
+    while :; do
+      msg=`curl -X GET -H "Content-Type: application/json" --insecure \
+          https://$admin_user:$admin_pwd@$monitor_ui_host:3000/api/admin/users/1`
+      if [ "$msg" != '' ]; then
+        break
+      fi
+      sleep 1
+      count=$count+1
+      if [ $count == 10 ]; then
+        break
+      fi
+    done
+}
+
+change_admin_pwd()
+{
+    msg=`curl -X PUT -H "Content-Type: application/json" -d '{"password": "Cms20admin"}' --insecure \
+        https://$admin_user:$admin_pwd@$monitor_ui_host:3000/api/admin/users/1/password`
+    if [ "$msg" != '{"message":"User password updated"}' ]; then
+      exit_error "Change admin pwd failed!"
+    fi
+}
+
+change_admin_name()
+{
+    msg=`curl -X PUT -H "Content-Type: application/json" -d '{"name": "monitorAdmin", "login": "monitorAdmin"}' --insecure \
+        https://$admin_user:$admin_pwd@$monitor_ui_host:3000/api/users/1`
+    if [ "$msg" != '{"message":"User updated"}' ]; then
+      exit_error "Change admin name failed!"
+    fi
+}
+
+create_user_org()
+{
+    msg=`curl -X GET -H "Content-Type: application/json" --insecure \
+        https://$admin_user:$admin_pwd@$monitor_ui_host:3000/api/orgs/name/$org`
+    if [ "$msg" == '{"message":"Organization not found","traceID":""}' ]; then
+        msg=`curl -X POST -H "Content-Type: application/json" -d "{\"name\": \"$org\"}" --insecure \
+          https://$admin_user:$admin_pwd@$monitor_ui_host:3000/api/orgs`
+        org_id=`echo $msg | awk -F',' '{print $2}' | awk -F':' '{print $2}' | awk -F'}' '{print $1}'`
+    else
+        exit_error "Org is existing!"
+    fi
+    msg=`curl -X POST -H "Content-Type: application/json" --insecure \
+        https://$admin_user:$admin_pwd@$monitor_ui_host:3000/api/user/using/$org_id`
+    cat > $path/org_id <<EOF
+$org_id
+EOF
+}
+
+create_user_pwd()
+{
+    if [[ (! -z "$user") && (! -z "$pwd") ]]; then
+      msg=`curl -X POST -H "Content-Type: application/json" \
+          -d "{\"name\": \"$user\", \"password\": \"$pwd\", \"login\": \"$user\", \"OrgId\": $org_id}" --insecure \
+          https://$admin_user:$admin_pwd@$monitor_ui_host:3000/api/admin/users`
+      correct_msg={\"id\":*,\"message\":\"User\ created\"}
+      if [[ "$msg" == $correct_msg ]]; then
+        user_id=`echo $msg | awk -F',' '{print $1}' | awk -F':' '{print $2}'`
+      else
+        exit_error "create user failed!"
+      fi
+    fi
+}
+
+update_user_permissions()
+{
+    msg=`curl -X PUT -H "Content-Type: application/json" -d '{"isGrafanaAdmin": false}' --insecure \
+        https://$admin_user:$admin_pwd@$monitor_ui_host:3000/api/admin/users/$user_id/permissions`
+    if [ "$msg" != '{"message":"User permissions updated"}' ]; then
+        exit_error "Update permit failed!"
+    fi
+}
+
+update_user_role()
+{
+    msg=`curl -X PATCH -H "Content-Type: application/json" -d '{"role": "Editor"}' --insecure \
+        https://$admin_user:$admin_pwd@$monitor_ui_host:3000/api/orgs/$org_id/users/$user_id`
+    if [ "$msg" != '{"message":"Organization user updated"}' ]; then
+        exit_error "Update user role failed!"
+    fi
+}
+
+update_data_source()
+{
+    msg=`curl -X POST -H "Content-Type: application/json" \
+        -d "{\"enabled\": true, \"pinned\": true}" --insecure \
+        https://$admin_user:$admin_pwd@$monitor_ui_host:3000/api/plugins/alexanderzobnin-zabbix-app/settings`
+    if [ "$msg" != '{"message":"Plugin settings updated"}' ]; then
+        exit_error "Enable zabbix plugin failed!"
+    fi
+
+    json_payload=$(cat <<EOF
+{
+    "name": "Zabbix",
+    "type": "alexanderzobnin-zabbix-datasource",
+    "typeLogoUrl": "",
+    "access": "proxy",
+    "url": "http://$internal_address:8080/api_jsonrpc.php",
+    "user": "",
+    "database": "",
+    "basicAuth": false,
+    "basicAuthUser": "",
+    "withCredentials": false,
+    "isDefault": true,
+    "jsonData": {
+        "cacheTTL": "2m",
+        "disableDataAlignment": false,
+        "trends": true,
+        "trendsFrom": "",
+        "trendsRange": "",
+        "username": "$zabbix_user",
+        "password": "$zabbix_passwd"
+    },
+    "secureJsonFields": {
+        "password": true
+    },
+    "readOnly": false
+}
+EOF
+)
+    msg=`curl -X POST -H "Content-Type: application/json" -d "$json_payload" --insecure \
+        https://$admin_user:$admin_pwd@$monitor_ui_host:3000/api/datasources`
+    zabbix_ds_uid=`echo $msg | awk -F'uid' '{print $2}' | awk -F',' '{print $1}' | awk -F':"' '{print $2}' | awk -F'"' '{print $1}'`
+
+    json_payload=$(cat <<EOF
+{
+    "name": "Elasticsearch",
+    "type": "elasticsearch",
+    "url": "http://$internal_address:9200",
+    "access": "proxy",
+    "basicAuth": true,
+    "basicAuthUser": "$es_user",
+    "jsonData": {
+        "timeField": "@timestamp"
+    },
+    "secureJsonData": {
+        "basicAuthPassword": "$es_passwd"
+    }
+}
+EOF
+)
+    msg=`curl -X POST -H "Content-Type: application/json" -d "$json_payload" --insecure \
+        https://$admin_user:$admin_pwd@$monitor_ui_host:3000/api/datasources`
+    es_ds_uid=`echo $msg | awk -F'uid' '{print $2}' | awk -F',' '{print $1}' | awk -F':"' '{print $2}' | awk -F'"' '{print $1}'`
+
+    json_payload=$(cat <<EOF
+{
+    "name": "Prometheus",
+    "type": "prometheus",
+    "access": "proxy",
+    "url": "http://$internal_address:9090/",
+    "basicAuth": false,
+    "withCredentials": false,
+    "isDefault": true,
+    "jsonData": {
+        "timeInterval": "15s",
+        "httpMethod": "POST"
+    },
+    "secureJsonFields": {},
+    "readOnly": false
+}
+EOF
+)
+    msg=`curl -X POST -H "Content-Type: application/json" -d "$json_payload" --insecure \
+        https://$admin_user:$admin_pwd@$monitor_ui_host:3000/api/datasources`
+    pm_ds_uid=`echo $msg | awk -F'uid' '{print $2}' | awk -F',' '{print $1}' | awk -F':"' '{print $2}' | awk -F'"' '{print $1}'`
+}
+
+update_dashboard()
+{
+    python3 $path/update_dashboard.py $zabbix_ds_uid $es_ds_uid $pm_ds_uid $path
+    for dashboard in monitor kubernetes; do
+        msg=`curl -X POST -H "Content-Type: application/json" -d @$path/$dashboard-updated.json --insecure \
+            https://$admin_user:$admin_pwd@$monitor_ui_host:3000/api/dashboards/db`
+        status=`echo $msg | awk -F'status' '{print $2}' | awk -F',' '{print $1}' | awk -F':' '{print $2}'`
+        if [ $status != "\"success\"" ]; then
+          exit_error "update $dashboard dashboard failed!"
+        fi
+    done
+}
+
+delete_user_org()
+{
+    msg=`curl -X GET -H "Content-Type: application/json" --insecure \
+        https://$admin_user:$admin_pwd@$monitor_ui_host:3000/api/orgs/name/$user`
+    org_id=`echo $msg | awk -F'id' '{print $2}' | awk -F',' '{print $1}' | awk -F':' '{print $2}'`
+
+    msg=`curl -X POST -H "Content-Type: application/json" --insecure \
+        https://$admin_user:$admin_pwd@$monitor_ui_host:3000/api/user/using/1`
+
+    msg=`curl -X DELETE -H "Content-Type: application/json" --insecure \
+        https://$admin_user:$admin_pwd@$monitor_ui_host:3000/api/orgs/$org_id`
+    if [ "$msg" != '{"message":"Organization deleted"}' ]; then
+      exit_error "delete organization failed!"
+    fi
+}
+
+delete_user()
+{
+    msg=`curl -X GET -H "Content-Type: application/json" --insecure \
+        https://$admin_user:$admin_pwd@$monitor_ui_host:3000/api/users/lookup?loginOrEmail=$user`
+    user_id=`echo $msg | awk -F'id' '{print $2}' | awk -F',' '{print $1}' | awk -F':' '{print $2}'`
+
+    msg=`curl -X DELETE -H "Content-Type: application/json"  --insecure \
+        https://$admin_user:$admin_pwd@$monitor_ui_host:3000/api/admin/users/$user_id`
+    if [ "$msg" != '{"message":"User deleted"}' ]; then
+      exit_error "delete user failed!"
+    fi
+}
+
+config_single()
+{
+    single=1
+    for cluster_host in $cluster_hosts; do
+        while :; do
+            if [ `ssh -oStrictHostKeyChecking=no cloud-user@$cluster_host "ls"; echo $?` -eq 0 ]; then
+                break
+            fi
+        done
+        hostname=`ssh -oStrictHostKeyChecking=no cloud-user@$cluster_host "hostname"`
+        config_keepalived
+    done
+}
+
+config_ha()
+{
+    wsrep_cluster_address_1=`echo $cluster_hosts | awk -F' ' '{print $1}'`
+    wsrep_cluster_address_2=`echo $cluster_hosts | awk -F' ' '{print $2}'`
+    wsrep_cluster_address_3=`echo $cluster_hosts | awk -F' ' '{print $3}'`
+    for cluster_host in $cluster_hosts; do
+        while :; do
+            if [ `ssh -oStrictHostKeyChecking=no cloud-user@$cluster_host "ls"; echo $?` -eq 0 ]; then
+                break
+            fi
+        done
+        hostname=`ssh -oStrictHostKeyChecking=no cloud-user@$cluster_host "hostname"`
+        config_mariadbcluster
+        config_zabbix
+        config_keepalived
+        config_prometheus
+    done
+}
+
+config_mariadbcluster()
+{
+    echo "Start Config Mariadb Cluster $cluster_host"
+    ssh -oStrictHostKeyChecking=no cloud-user@$cluster_host "sudo systemctl stop zabbix-server nginx php-fpm"
+    ssh -oStrictHostKeyChecking=no cloud-user@$cluster_host 'sudo systemctl stop mariadb'
+    ssh -oStrictHostKeyChecking=no cloud-user@$cluster_host "sudo sed -i -e 's/wsrep_on = OFF/wsrep_on = ON/g' /etc/my.cnf"
+    ssh -oStrictHostKeyChecking=no cloud-user@$cluster_host "sudo sed -i -e 's/bind-address = 127.0.0.1/bind-address = $cluster_host/g' /etc/my.cnf"
+    ssh -oStrictHostKeyChecking=no cloud-user@$cluster_host 'sudo chmod 666 /etc/my.cnf'
+    ssh -oStrictHostKeyChecking=no cloud-user@$cluster_host 'sudo cat >> /etc/my.cnf' <<EOF
+wsrep_cluster_address = gcomm://$wsrep_cluster_address_1:4567,$wsrep_cluster_address_2:4567,$wsrep_cluster_address_3:4567
+wsrep_provider_options = gmcast.listen_addr=tcp://$cluster_host:4567;ist.recv_addr=$cluster_host:4568;
+wsrep_node_address = $cluster_host:4567
+wsrep_sst_receive_address = $cluster_host:4444
+wsrep_node_name = $hostname
+EOF
+    ssh -oStrictHostKeyChecking=no cloud-user@$cluster_host 'sudo chmod 644 /etc/my.cnf'
+    if [[ $cluster_host == $wsrep_cluster_address_1 ]]; then
+        ssh -oStrictHostKeyChecking=no cloud-user@$cluster_host 'sudo galera_new_cluster'
+    else
+        ssh -oStrictHostKeyChecking=no cloud-user@$cluster_host 'sudo systemctl start mariadb'
+    fi
+    echo "Config Mariadb Cluster End"
+}
+
+config_zabbix()
+{
+    echo "Start Config Zabbix Cluster $cluster_host"
+    ssh -oStrictHostKeyChecking=no cloud-user@$cluster_host "sudo sed -i -e 's/DBHost=127.0.0.1/DBHost=$cluster_host/g' /etc/zabbix/zabbix_server.conf"
+    ssh -oStrictHostKeyChecking=no cloud-user@$cluster_host "sudo sed -i -e 's/# HANodeName=/HANodeName=$hostname/g' /etc/zabbix/zabbix_server.conf"
+    ssh -oStrictHostKeyChecking=no cloud-user@$cluster_host "sudo sed -i -e 's/127.0.0.1/$cluster_host/g' /etc/zabbix/web/zabbix.conf.php"
+    ssh -oStrictHostKeyChecking=no cloud-user@$cluster_host "sudo systemctl restart zabbix-server nginx php-fpm"
+    echo "Config Zabbix Cluster End"
+}
+
+config_keepalived()
+{
+    echo "Start Config Keepalived $cluster_host"
+    if [ -e $path/org_id ]; then
+        vrid=`cat $path/org_id`
+        vrid=$(($vrid + 52))
+    else
+        vrid=50
+    fi
+    if [ $single == 1 ]; then
+        ssh -oStrictHostKeyChecking=no cloud-user@$cluster_host 'sudo cat > ~/check-alive' <<EOF
+#!/bin/bash
+
+exit_error()
+{
+    echo "ERROR: Zabbix service is not active!" 1>&2
+    exit 1
+}
+systemctl status zabbix-server | grep active > /dev/null 2>&1
+if [ \$? -eq 1 ];then
+    systemctl restart zabbix-server nginx php-fpm
+fi
+systemctl status zabbix-server | grep active > /dev/null 2>&1 || exit_error
+EOF
+   else
+       ssh -oStrictHostKeyChecking=no cloud-user@$cluster_host 'sudo cat > ~/check-alive' <<EOF
+#!/bin/bash
+
+exit_error()
+{
+    echo "ERROR: Zabbix service is not active!" 1>&2
+    exit 1
+}
+systemctl status zabbix-server | grep active > /dev/null 2>&1
+if [ \$? -eq 1 ];then
+    systemctl restart zabbix-server nginx php-fpm
+fi
+nodeName=\`hostname\`
+zabbix_server -R ha_status | grep \$nodeName > /dev/null 2>&1 || exit_error
+EOF
+    fi
+    ssh -oStrictHostKeyChecking=no cloud-user@$cluster_host 'sudo mv ~/check-alive /etc/keepalived/'
+    ssh -oStrictHostKeyChecking=no cloud-user@$cluster_host 'sudo chcon -t keepalived_unconfined_script_exec_t /etc/keepalived/check-alive'
+    ssh -oStrictHostKeyChecking=no cloud-user@$cluster_host 'sudo chmod +x /etc/keepalived/check-alive'
+    ssh -oStrictHostKeyChecking=no cloud-user@$cluster_host 'sudo chmod 666 /etc/keepalived/keepalived.conf'
+    ssh -oStrictHostKeyChecking=no cloud-user@$cluster_host 'sudo cat > /etc/keepalived/keepalived.conf' <<EOF
+vrrp_script check-alive {
+    script "/etc/keepalived/check-alive"
+    interval 2
+    fall 2
+    rise 3
+}
+
+vrrp_instance master_internal {
+    state BACKUP
+    nopreempt
+    interface eth0
+    virtual_router_id $vrid
+    priority 1
+    advert_int 1
+    authentication {
+        auth_type PASS
+        auth_pass 1111
+    }
+    virtual_ipaddress {
+        $internal_address dev eth0
+    }
+    track_script {
+        check-alive
+    }
+}
+
+vrrp_instance master_external {
+    state BACKUP
+    nopreempt
+    interface eth1
+    virtual_router_id 51
+    priority 1
+    advert_int 1
+    authentication {
+        auth_type PASS
+        auth_pass 1111
+    }
+    virtual_ipaddress {
+        $external_address dev eth1
+    }
+    track_script {
+        check-alive
+    }
+}
+EOF
+    ssh -oStrictHostKeyChecking=no cloud-user@$cluster_host 'sudo systemctl enable keepalived | sudo systemctl restart keepalived'
+    echo "Config Keepalived End"
+}
+
+config_prometheus()
+{
+    echo "Start Config Prometheus Cluster"
+    ssh -oStrictHostKeyChecking=no cloud-user@$cluster_host "sudo sed -i -e 's/replica: prometheus-server/replica: $hostname/g' /etc/prometheus/prometheus.yml"
+    ssh -oStrictHostKeyChecking=no cloud-user@$cluster_host "sudo docker restart prometheus-server"
+    echo "Config Prometheus Cluster End"
+}
+
+update_keepalived()
+{
+    echo "Start Update Keepalived"
+    for cluster_host in $cluster_hosts; do
+        while :; do
+            if [ `ssh -oStrictHostKeyChecking=no cloud-user@$cluster_host "ls"; echo $?` -eq 0 ]; then
+                break
+            fi
+        done
+        for interface_address in $interface_addresses; do
+            interface_ip=`ssh -oStrictHostKeyChecking=no cloud-user@$cluster_host "ip addr | grep $interface_address"`
+            if [[ -n "$interface_ip" ]]; then
+                interface_name=`echo $interface_ip | awk '{print $9}'`
+                interface_mac=`ssh -oStrictHostKeyChecking=no cloud-user@$cluster_host "ip addr show $interface_name | grep link/ether"`
+                interface_mac=`echo $interface_mac | awk '{print $2}'`
+                interface_number=`echo $interface_name | awk -F'eth' '{print $2}'`
+                break
+            fi
+        done
+        if [ $deleted == "False" ]; then
+            ssh -oStrictHostKeyChecking=no cloud-user@$cluster_host 'sudo cat >> /etc/keepalived/keepalived.conf' <<EOF
+vrrp_instance master_$interface_name {
+    state BACKUP
+    nopreempt
+    interface $interface_name
+    virtual_router_id $interface_number
+    priority 1
+    advert_int 1
+    authentication {
+        auth_type PASS
+        auth_pass 1111
+    }
+    virtual_ipaddress {
+        $virtual_address dev $interface_name
+    }
+    track_script {
+        check-alive
+    }
+}
+EOF
+        ssh -oStrictHostKeyChecking=no cloud-user@$cluster_host "sudo touch /etc/sysconfig/network-scripts/ifcfg-$interface_name"
+        ssh -oStrictHostKeyChecking=no cloud-user@$cluster_host "sudo chmod 666 /etc/sysconfig/network-scripts/ifcfg-$interface_name"
+        ssh -oStrictHostKeyChecking=no cloud-user@$cluster_host "sudo cat > /etc/sysconfig/network-scripts/ifcfg-$interface_name" <<EOF
+AUTOCONNECT_PRIORITY=120
+BOOTPROTO=none
+DEVICE=$interface_name
+HWADDR=$interface_mac
+IPADDR=$interface_address
+ONBOOT=yes
+TYPE=Ethernet
+USERCTL=no
+EOF
+        else
+            ssh -oStrictHostKeyChecking=no cloud-user@$cluster_host "sudo sed -i -e '/master_$interface_name/,+17d' /etc/keepalived/keepalived.conf"
+        fi
+        ssh -oStrictHostKeyChecking=no cloud-user@$cluster_host 'sudo systemctl enable keepalived | sudo systemctl reload keepalived'
+    done
+    echo "Update Keepalived End"
+}
+
+start()
+{
+    case "$1" in
+    config)
+        monitor_ui_host=$2
+        internal_address=$3
+        path=$4
+        wait_for_change
+        create_user_org
+        create_user_pwd
+        update_user_permissions
+        update_user_role
+        update_data_source
+        update_dashboard
+        ;;
+    delete)
+        monitor_ui_host=$2
+        delete_user_org
+        delete_user
+        ;;
+    ha)
+        cluster_hosts=$2
+        external_address=$3
+        internal_address=$4
+        path=$5
+        config_ha
+        ;;
+    single)
+        cluster_hosts=$2
+        external_address=$3
+        internal_address=$4
+        path=$5
+        config_single
+        ;;
+    update)
+        cluster_hosts=$2
+        virtual_address=$3
+        interface_addresses=$4
+        deleted=$5
+        update_keepalived
+    esac
+}
+
+
+start "$@"
+
+exit 0
+

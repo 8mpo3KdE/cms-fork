@@ -1,0 +1,104 @@
+#!/bin/bash
+service_proxy=$1
+product_version=$2
+os_version=$3
+depot_fqdn=$4
+zone_name=$5
+domain_name=$6
+
+set_repo()
+{   
+    echo "INFO: Setup depot repo."
+    local depot=/etc/yum.repos.d/depot.repo 
+    if [ -f $depot ]; then
+        return
+    fi
+    rm /etc/yum.repos.d/*
+    cat > /etc/yum.repos.d/depot.repo << EOF
+[BaseOS]
+name=BaseOS
+baseurl=http://$depot_fqdn/$product_version/$os_version/BaseOS
+proxy=http://$service_proxy:3128
+enabled=1
+gpgcheck=0
+priority=9
+[AppStream]
+name=AppStream
+baseurl=http://$depot_fqdn/$product_version/$os_version/AppStream
+proxy=http://$service_proxy:3128
+enabled=1
+gpgcheck=0
+priority=9
+[grafana]
+name=grafana
+baseurl=http://$depot_fqdn/$product_version/$os_version/grafana
+proxy=http://$service_proxy:3128
+enabled=1
+gpgcheck=0
+priority=9
+
+EOF
+}
+
+set_cert()
+{
+    local cert=/etc/pki/ca-trust/source/anchors/client.pem
+
+    echo "INFO: Check client cert."
+    if [ -f $cert ]; then
+        return
+    fi
+    echo "INFO: Setup client cert."
+    curl  http://$service_proxy/cert/client/client.pem -o $cert
+    update-ca-trust
+}
+
+set_grafana()
+{
+    echo "INFO: Install Grafana."
+
+# Create necessary directories
+mkdir -p /etc/grafana/
+mkdir -p /var/lib/grafana/
+mkdir -p /var/log/grafana/
+
+# Install wget if not already installed
+dnf install -y wget
+
+# Download Grafana configuration and other files
+wget --reject-regex '.*\.html*' -r -np $service_proxy/monitor/ui/
+find $service_proxy/ -name "index.html*" -type f -delete
+# Copy the downloaded files to the appropriate directories
+cp -r $service_proxy/monitor/ui/* /etc/grafana/
+rm -rf $service_proxy
+
+# Set the ownership for Grafana directories
+chown -R 472:0 /etc/grafana/
+chown -R 472:0 /var/lib/grafana/
+chown -R 472:0 /var/log/grafana/
+
+# # Set the correct permissions for Grafana configuration files and directories
+# chmod 644 /etc/grafana/grafana.ini
+# chmod 755 /etc/grafana/
+# chmod 755 /var/lib/grafana/
+# chmod 755 /var/log/grafana/
+
+# Install and Run Grafana
+sudo dnf install -y grafana unzip
+curl  http://$service_proxy/monitor/ui/alexanderzobnin-zabbix-app-4.4.4.linux_amd64.zip \
+-o alexanderzobnin-zabbix-app-4.4.4.linux_amd64.zip
+unzip alexanderzobnin-zabbix-app-4.4.4.linux_amd64.zip -d /var/lib/grafana/plugins/
+curl  http://$service_proxy/cert/$zone_name/$zone_name.crt \
+-o /etc/grafana/localhost.crt
+curl  http://$service_proxy/cert/$zone_name/$zone_name.key \
+-o /etc/grafana/localhost.key
+sudo sed -i -e "s/;domain = localhost/domain = $domain_name/g"  /etc/grafana/grafana.ini
+sudo sed -i -e "s/;disable_sanitize_html = false/disable_sanitize_html = true/g" /etc/grafana/grafana.ini
+sudo systemctl enable grafana-server
+sudo systemctl start grafana-server
+}
+
+set_repo
+set_cert
+set_grafana
+

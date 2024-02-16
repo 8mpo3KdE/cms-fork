@@ -1,0 +1,16 @@
+[BaseOS]
+name=BaseOS
+baseurl=http://{{depot_fqdn}}/{{repo_baseos}}
+proxy={{http_proxy_url}}
+enabled=1
+gpgcheck=0
+priority=9
+
+[AppStream]
+name=AppStream
+baseurl=http://{{depot_fqdn}}/{{repo_appstream}}
+proxy={{http_proxy_url}}
+enabled=1
+gpgcheck=0
+priority=9
+

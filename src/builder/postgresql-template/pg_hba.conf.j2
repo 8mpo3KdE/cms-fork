@@ -1,0 +1,7 @@
+# TYPE  DATABASE        USER     ADDRESS        METHOD
+local   all             all                     peer
+host    all             all      127.0.0.1/32   ident
+local   replication     all                     peer
+host    replication     replica  {{cidr}}  trust
+host    all             all      {{cidr}}  md5
+

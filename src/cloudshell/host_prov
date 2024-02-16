@@ -1,0 +1,114 @@
+#!/bin/bash
+
+update_hosts()
+{
+    proxy=$(awk '/service-proxy/{print $3}' /etc/cms/cloudshell.conf)
+    registry=$(awk '/registry/{print $3}' /etc/cms/cloudshell.conf)
+    grep depot /etc/hosts > /dev/null 2>&1
+    if (($?)); then
+        echo "$proxy    depot" >> /etc/hosts
+    fi
+    grep $registry /etc/hosts > /dev/null 2>&1
+    if (($?)); then
+        echo "$proxy    $registry" >> /etc/hosts
+    fi
+}
+
+setup_ssl_cert()
+{
+    echo "update ssl cert"
+    sudo curl -s http://depot/cert/client/client.pem \
+            -o /etc/pki/ca-trust/source/anchors/client.pem
+    sudo update-ca-trust
+}
+
+enable_root_ssh()
+{
+    echo "enable root login"
+    sudo cp /home/centos/.ssh/authorized_keys /root/.ssh/
+}
+
+install_docker()
+{
+    echo "install docker"
+
+    sudo rm -rf  /etc/yum.repos.d/
+    sudo mkdir /etc/yum.repos.d
+
+    cat << __EOF__ | sudo tee /etc/yum.repos.d/depot.repo
+[BaseOS]
+name=BaseOS
+baseurl=http://depot/CentOS-Stream-8/BaseOS
+enabled=1
+gpgcheck=0
+priority=9
+
+[AppStream]
+name=AppStream
+baseurl=http://depot/CentOS-Stream-8/AppStream
+enabled=1
+gpgcheck=0
+priority=9
+
+[Docker]
+name=Docker
+baseurl=http://depot/docker
+enabled=1
+gpgcheck=0
+priority=9
+__EOF__
+
+    sudo dnf install -y docker-ce --allowerasing
+    sudo touch /etc/docker/daemon.json
+
+    cat << __EOF__ | sudo tee /etc/docker/daemon.json
+{
+        "bip": "10.250.250.1/24"
+}
+__EOF__
+
+    echo "restrating docker..."
+    sudo systemctl enable docker
+    sudo systemctl restart docker
+}
+
+provisioning()
+{
+    update_hosts
+    setup_ssl_cert
+    enable_root_ssh
+    install_docker
+    echo "--- CloudShell host provisioning successful ---"
+}
+
+help()
+{
+    echo "help: "
+    echo "$0 <host_ip>"
+}
+
+start()
+{
+    if [ -z $1 ]; then
+        help
+        exit 0
+    fi
+
+    if [ "$cli_path" != "/tmp" ]; then
+        scp $cli_name centos@$1:/tmp/
+        echo "copy myself to $1"
+        ssh centos@$1 /tmp/$cli_name "$@"
+
+        ssh $1 rm -f /tmp/$cli_name
+    else
+        provisioning
+    fi
+}
+
+cli_path=$(dirname $0)
+cli_name=$(basename $0)
+
+start "$@"
+
+exit 0
+

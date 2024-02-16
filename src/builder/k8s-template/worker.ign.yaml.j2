@@ -1,0 +1,121 @@
+variant: fcos
+version: 1.4.0
+passwd:
+  users:
+    - name: core
+      #password_hash: $y$j9T$Vk6xgdr05n4BXaz3rMvBw0$Pr63J3H.u4q2yotAJSrnzB5pQaDG/Yyx5sWH93tbwi8
+      ssh_authorized_keys:
+        - {{ssh_key}}
+storage:
+  files:
+    - path: /etc/hostname
+      mode: 0644
+      contents:
+        inline: {{hostname}}
+    - path: /etc/NetworkManager/system-connections/ens3.nmconnection
+      mode: 0600
+      contents:
+        inline: |
+          [connection]
+          id=ens3
+          type=ethernet
+          interface-name=ens3
+          [ipv4]
+          address1={{node_addrs[idx]}}/{{node_prefix_len}}
+{% if api_access == "corp" and service_access == "corp" %}
+          gateway={{corp_gw}}
+{% else %}
+          gateway={{public_gw}}
+          route2=10.0.0.0/8,{{corp_gw}}
+          route3=172.16.0.0/16,{{corp_gw}}
+{% endif %}
+          route1=169.254.169.254,{{node_metadata_addr}}
+          dns=172.16.100.100;172.16.100.80;
+          dns-search={{domain}}
+          may-fail=false
+          method=manual
+          [ipv6]
+          method=disabled
+{% if ingress %}
+    - path: /etc/kubernetes/manifests/keepalived.yaml
+      mode: 0644
+      contents:
+        inline: |
+          apiVersion: v1
+          kind: Pod
+          metadata:
+            name: keepalived
+            namespace: kube-system
+          spec:
+            containers:
+            - image: {{registry_fqdn}}/osixia/keepalived:2.0.20
+              name: keepalived
+              securityContext:
+                capabilities:
+                  add:
+                  - NET_ADMIN
+                  - NET_BROADCAST
+                  - NET_RAW
+              volumeMounts:
+              - mountPath: /usr/local/etc/keepalived/keepalived.conf
+                name: config
+              - mountPath: /etc/keepalived/check-ingress
+                name: check
+            hostNetwork: true
+            volumes:
+            - hostPath:
+                path: /etc/keepalived/keepalived.conf
+              name: config
+            - hostPath:
+                path: /etc/keepalived/check-ingress
+              name: check
+    - path: /etc/keepalived/keepalived.conf
+      mode: 0644
+      contents:
+        inline: |
+          vrrp_script check-ingress {
+              script "/etc/keepalived/check-ingress"
+              interval 2
+              weight 20
+          }
+          vrrp_instance int-vip-{{ingress_vrid}} {
+              state MASTER
+              interface ens3
+              virtual_router_id {{ingress_vrid}}
+              priority 100
+              advert_int 1
+              virtual_ipaddress {
+                  {{ingress_int_vip}}/32
+              }
+              authentication {
+                  auth_type PASS
+                  auth_pass VRRP_PASS
+              }
+              track_script {
+                  check-ingress
+              }
+          }
+    - path: /etc/keepalived/check-ingress
+      mode: 0755
+      contents:
+        inline: |
+          #!/bin/sh
+
+          exit_error() {
+              echo "ERROR: $*" 1>&2
+              exit 1
+          }
+          /usr/bin/timeout 1.9 \
+                  /usr/bin/curl -o /dev/null \
+                  -Lfs http://localhost:10254/healthz \
+                  || exit_error "GET http://localhost:10254/healthz"
+{% endif %}
+systemd:
+  units:
+    - name: docker.service
+      mask: true
+    - name: zincati.service
+      mask: true
+    - name: afterburn-sshkeys@core.service
+      mask: true
+
